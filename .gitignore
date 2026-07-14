@@ -17,5 +17,15 @@ dist/
 .env.*
 *.local
 
+# M365 Admin Tool: tenant list (secret-ish) + runtime data -- never commit
+config.json
+M365Snapshots/
+M365AuditLog/
+M365Logs/
+M365Reports/
+
+# Session transfer / build-artifact staging (tarballs + handoff notes)
+Handoff/
+
 # Claude Code local session state (keep CLAUDE.md and .claude/commands/ tracked)
 .claude/settings.local.json

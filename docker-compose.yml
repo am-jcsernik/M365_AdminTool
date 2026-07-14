@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  m365-reports:
+    build: .
+    container_name: m365-admin-reports
+    ports:
+      - "3365:3365"
+    environment:
+      - DOCKER_MODE=1
+      - PORT=3365
+    volumes:
+      # Persist exported CSV reports
+      - ./M365Reports:/app/M365Reports
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3365/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

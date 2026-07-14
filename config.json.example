@@ -1,0 +1,6 @@
+{
+  "tenants": [
+    { "name": "AM Consulting", "tenantId": "am.consulting", "default": true },
+    { "name": "Client Tenant Example", "tenantId": "00000000-0000-0000-0000-000000000000" }
+  ]
+}
