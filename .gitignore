@@ -1,0 +1,21 @@
+﻿# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Build / deps (extend per project)
+node_modules/
+bin/
+obj/
+dist/
+*.log
+
+# Local env / secrets -- never commit
+.env
+.env.*
+*.local
+
+# Claude Code local session state (keep CLAUDE.md and .claude/commands/ tracked)
+.claude/settings.local.json
