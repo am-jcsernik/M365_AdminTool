@@ -5,6 +5,30 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-14 -- ADR-0005: First live ACA deploy landed in eastus2, deploy script hardened
+**Context:** Executing the first real `deploy/Deploy-ToAca.ps1` run surfaced four
+issues in sequence. (1) `az acr build` crashed the *local* CLI with a
+`UnicodeEncodeError` (colorama writing a `→` from build logs to a Windows cp1252
+console) — but the *server-side* build succeeded every time. (2) eastus could not
+provision the Container Apps managed environment (`AKSCapacityHeavyUsage`). (3) The
+data-plane `az acr repository show-tags` read failed from this workstation
+(`CONNECTIVITY_CHALLENGE_ERROR`) after registry delete/recreate churn. (4) An
+initial resilience check I added wrongly gated a clean exit-0 build on that same
+data-plane read.
+**Decision:** Deploy the whole co-located stack in **eastus2** (ACR + storage +
+env together; the Bicep pins all resources to `resourceGroup().location`, so a
+region move means moving everything, and reusing the globally-unique ACR/storage
+names required deleting the eastus RG first). Harden the script: build with
+`--no-logs`; treat `exit 0` as success without a follow-up tag read; add
+`-SkipBuild`; make the `-SkipBuild` tag check tolerant of data-plane read failures
+(ACA pulls via ACR admin creds, so that read is not on the critical path).
+**Consequences:** App v11.12.2 is live and verified in eastus2 (Easy Auth gate +
+in-app device-code connect confirmed). The deploy script is now robust to the
+Windows log-stream bug and to regional capacity/registry-churn quirks. Open: the
+local `*.azurecr.io` data-plane read failure is unresolved (cosmetic for deploys,
+but affects any local ACR content query); `PYTHONUTF8`/`PYTHONIOENCODING` do NOT
+fix the frozen-az Unicode crash, hence `--no-logs`.
+
 ## 2026-07-14 -- ADR-0004: Raw passthrough execution for device-code auth
 **Context:** In a headless container, `Connect-MgGraph`/`Connect-ExchangeOnline`
 device-code sign-in never surfaced the code (UI or logs), so auth timed out. The

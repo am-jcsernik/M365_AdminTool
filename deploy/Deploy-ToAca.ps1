@@ -72,11 +72,20 @@ param(
     [string] $EnvironmentName  = 'm365-admin-env',
     [string] $FileShareName    = 'm365data',
     [string] $Tag,
-    [string] $AppRegName       = 'M365 Admin Reports (Easy Auth)'
+    [string] $AppRegName       = 'M365 Admin Reports (Easy Auth)',
+    [switch] $SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# `az acr build` streams the remote build log to the local console. On a Windows
+# cp1252 console, a non-ASCII char in that log (e.g. U+2192 "→" from npm/build
+# output) crashes the CLI with `UnicodeEncodeError: 'charmap' codec can't encode`
+# and aborts the deploy — even though the server-side build is fine. Force UTF-8
+# I/O for the child az/Python process so log streaming can encode any character.
+$env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONUTF8       = '1'
 
 # Resolve repo root (this script lives in deploy/).
 $RepoRoot   = Split-Path -Parent $PSScriptRoot
@@ -128,10 +137,62 @@ Invoke-Az @('acr','create','--resource-group',$ResourceGroup,'--name',$AcrName,
 $AcrLoginServer = "$AcrName.azurecr.io"
 $FullImage      = "$AcrLoginServer/${ImageName}:$Tag"
 
-Write-Step "Building image in ACR: $FullImage"
-# `az acr build` uploads the build context and builds server-side, so a local
-# Docker daemon is not required. Context is the repo root (respects .dockerignore).
-Invoke-Az @('acr','build','--registry',$AcrName,'--image',"${ImageName}:$Tag",$RepoRoot) | Out-Null
+if ($SkipBuild) {
+    Write-Step "Skipping image build (-SkipBuild): expecting $FullImage to exist"
+    if (-not $WhatIfPreference) {
+        # `show-tags` is a DATA-PLANE call (registry endpoint + AAD token challenge)
+        # and can fail on its own (CONNECTIVITY_CHALLENGE_ERROR, stale token cache
+        # after registry churn) even when the image is present. That read is NOT on
+        # the deploy's critical path: ACA pulls via the ACR admin user/password
+        # (basic auth) from Azure's own network. So treat a read *failure* as
+        # inconclusive (warn + continue; the container pull is the real gate) and
+        # only hard-fail when the read succeeds and the tag is genuinely absent.
+        $tags = az acr repository show-tags --name $AcrName --repository $ImageName -o tsv 2>$null
+        $tagsExit = $LASTEXITCODE
+        if ($tagsExit -ne 0) {
+            Write-Host "  WARN: could not read tags from the $AcrName data plane (exit $tagsExit); cannot confirm '$Tag' from here. Continuing -- ACA's image pull is the real check." -ForegroundColor Yellow
+        } elseif ($tags -notcontains $Tag) {
+            throw "-SkipBuild was set but image tag '$Tag' is not present in $AcrName. Build it first (drop -SkipBuild)."
+        } else {
+            Write-Host "  Found existing image: $FullImage" -ForegroundColor Green
+        }
+    }
+} else {
+    Write-Step "Building image in ACR: $FullImage"
+    # `az acr build` uploads the build context and builds server-side, so a local
+    # Docker daemon is not required. Context is the repo root (respects .dockerignore).
+    #
+    # IMPORTANT (Windows): az's build-LOG STREAMER crashes with a
+    # `UnicodeEncodeError` when a non-ASCII char (e.g. U+2192 "→" from npm/apt
+    # output) is written to a cp1252 console. It can die mid-build or after the
+    # server-side build has already succeeded; `PYTHONUTF8`/`PYTHONIOENCODING`
+    # don't help because the shipped az is a frozen build. Fix: `--no-logs`
+    # suppresses that client stream entirely — az still WAITS for the server-side
+    # build and returns a correct exit code, there's just nothing to crash on.
+    # The tag-existence check below is a belt-and-suspenders backstop.
+    if ($WhatIfPreference) {
+        Write-Host "  WHATIF> az acr build --no-logs --registry $AcrName --image ${ImageName}:$Tag $RepoRoot" -ForegroundColor DarkYellow
+    } else {
+        Write-Host "  > az acr build --no-logs --registry $AcrName --image ${ImageName}:$Tag $RepoRoot" -ForegroundColor DarkGray
+        & az acr build --no-logs --registry $AcrName --image "${ImageName}:$Tag" $RepoRoot 2>&1 | ForEach-Object { Write-Host "    $_" }
+        $buildExit = $LASTEXITCODE
+        if ($buildExit -eq 0) {
+            # Clean success: with --no-logs, az waited for the server-side build
+            # and returned 0. Do NOT gate on a follow-up show-tags read here --
+            # the freshly pushed tag can lag the registry's tag listing briefly.
+            Write-Host "  Image built and pushed: $FullImage" -ForegroundColor Green
+        } else {
+            # Non-zero exit: az may have crashed on the log stream (Windows Unicode
+            # bug) *after* the server-side build already succeeded. Verify by tag.
+            $tags = az acr repository show-tags --name $AcrName --repository $ImageName -o tsv 2>$null
+            if ($tags -contains $Tag) {
+                Write-Host "  az acr build exited $buildExit (likely the Windows log-stream Unicode bug), but image '$Tag' IS present in ACR -- continuing." -ForegroundColor Yellow
+            } else {
+                throw "az acr build failed (exit $buildExit) and image tag '$Tag' is not in $AcrName. See build output above."
+            }
+        }
+    }
+}
 
 Write-Host '  Retrieving ACR admin credentials...'
 if (-not $WhatIfPreference) {
