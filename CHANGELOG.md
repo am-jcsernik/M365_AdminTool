@@ -4,6 +4,35 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [11.12.1] — 2026-07-14
+
+### Fixed
+- **Device-code sign-in now works in the container / ACA.** In `DOCKER_MODE`
+  the Graph connect uses device-code auth, but the code never appeared — not in
+  the UI and not in the logs — so sign-in always timed out after 120s. Two
+  causes: (1) the persistent pwsh session was interactive (no `-NonInteractive`),
+  so PSReadLine terminal rendering polluted/hid the output; and (2) the Graph SDK
+  emits the device-code prompt on the Success stream, which the command wrapper
+  captured (`$__r = & { … }`) and the connect line discarded (`| Out-Null`), so
+  it never streamed to stdout. Fixes:
+  - Spawn the session with `-NonInteractive`.
+  - Add a **raw passthrough execution mode** (`runInSession(..., {raw:true})`)
+    that runs a command at statement level without capturing/Out-Null-ing its
+    output, so the device-code prompt streams to the session stdout live; the
+    command writes its result to the job out-file instead.
+  - Capture the device-code prompt server-side and expose it on
+    `GET /api/job/:id` (`deviceCode: {url, code}`).
+
+### Added
+- **Device code shown in the web UI.** The connect banner now displays the
+  `microsoft.com/device` link and the code (with a copy button) as soon as the
+  server surfaces them, so operators never tail the server/container console.
+
+### Changed
+- `docker-compose.yml`: host port is overridable via `HOST_PORT` (defaults to
+  3365) so local container validation can coexist with a native instance on
+  3365; removed the obsolete `version:` key.
+
 ## [11.12.0] — 2026-07-14
 
 ### Added

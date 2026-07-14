@@ -168,11 +168,25 @@ let psProc = null, psAlive = false;
 function startSession() {
   if (!detectedPS.exe) return;
   log(`Starting session: ${detectedPS.exe}`);
-  psProc = spawn(detectedPS.exe, ["-NoProfile", "-NoExit", "-Command", "-"], { env: { ...process.env }, stdio: ["pipe", "pipe", "pipe"], shell: false });
+  // -NonInteractive is required: without it PSReadLine loads and renders the
+  // session as a terminal, emitting escape sequences that swallow MSAL's
+  // device-code prompt. With it, `Connect-MgGraph -UseDeviceAuthentication`
+  // prints the code as a clean line we can capture and surface to the UI.
+  psProc = spawn(detectedPS.exe, ["-NoProfile", "-NonInteractive", "-NoExit", "-Command", "-"], { env: { ...process.env }, stdio: ["pipe", "pipe", "pipe"], shell: false });
   psAlive = true;
   log(`Session PID: ${psProc.pid}`);
 
-  psProc.stdout.on("data", d => { const t = d.toString().trim(); if (t && t.length < 300) log(`[PS out] ${t}`); });
+  psProc.stdout.on("data", d => {
+    const s = d.toString();
+    // MSAL device-code prompt, e.g. "To sign in, use a web browser to open the
+    // page https://microsoft.com/devicelogin and enter the code ABCD1234 to
+    // authenticate." Capture it so the UI can display the link + code instead
+    // of the operator having to tail the server/container console.
+    const m = s.match(/open the page\s+(\S+)\s+and enter the code\s+([A-Za-z0-9]+)/i);
+    if (m) { deviceCode = { url: m[1], code: m[2], at: Date.now() }; log(`[device-code] enter ${deviceCode.code} at ${deviceCode.url}`); }
+    const t = s.trim();
+    if (t && t.length < 300) log(`[PS out] ${t}`);
+  });
   psProc.stderr.on("data", d => { const t = d.toString().replace(/\x1b\[[0-9;]*m/g, "").trim(); if (t && !t.startsWith(">>")) log(`[PS err] ${t.slice(0, 200)}`); });
   psProc.on("close", code => { log(`Session closed (${code})`); psAlive = false; });
   psProc.on("error", err => { log(`Session error: ${err.message}`); psAlive = false; });
@@ -187,6 +201,9 @@ function startSession() {
 
 const jobs = new Map();
 let connectionInfo = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null };
+// Most recent device-code prompt ({ url, code, at }), surfaced to the client
+// during a device-code connect. Null when none is pending.
+let deviceCode = null;
 setIdentityProvider(() => connectionInfo.account || null);
 let entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
 
@@ -246,8 +263,18 @@ function buildLegacyScript(command, shortId, outFile, errFile, doneFile, esc) {
   return `# Job: ${shortId}\ntry {\n  $__r = & {\n${command}\n  }\n  if ($null -ne $__r) { $__r | Out-File -FilePath '${esc(outFile)}' -Encoding utf8 -Width 99999 } else { '' | Out-File -FilePath '${esc(outFile)}' -Encoding utf8 }\n} catch {\n  $_.Exception.Message | Out-File -FilePath '${esc(errFile)}' -Encoding utf8\n  $_.ScriptStackTrace | Out-File -FilePath '${esc(errFile)}' -Append -Encoding utf8\n}\n'done' | Out-File -FilePath '${esc(doneFile)}' -Encoding utf8`;
 }
 
+// Passthrough execution: the command runs at statement level — NOT captured
+// into a variable and NOT piped to Out-Null — so host/Success-stream output
+// (notably the MSAL device-code prompt emitted during Connect-MgGraph) streams
+// to the session stdout live, where startSession()'s handler can surface it.
+// The command writes its own result to __OUTFILE__ (token replaced here).
+function buildRawScript(command, shortId, outFile, errFile, doneFile, esc) {
+  const cmd = command.replace(/__OUTFILE__/g, esc(outFile));
+  return `# Job: ${shortId} (raw)\ntry {\n${cmd}\n} catch {\n  $_.Exception.Message | Out-File -FilePath '${esc(errFile)}' -Encoding utf8\n  $_.ScriptStackTrace | Out-File -FilePath '${esc(errFile)}' -Append -Encoding utf8\n}\n'done' | Out-File -FilePath '${esc(doneFile)}' -Encoding utf8`;
+}
+
 function executeInSession({ command, jobId, opts }) {
-  const { timeout = 300000, structured = false } = opts;
+  const { timeout = 300000, structured = false, raw = false } = opts;
   const session = jobs.get(jobId);
   session.status = "running";
   const shortId = jobId.slice(0, 8);
@@ -266,7 +293,9 @@ function executeInSession({ command, jobId, opts }) {
 
   const script = structured
     ? buildStructuredScript(command, shortId, outFile, doneFile, esc)
-    : buildLegacyScript(command, shortId, outFile, errFile, doneFile, esc);
+    : raw
+      ? buildRawScript(command, shortId, outFile, errFile, doneFile, esc)
+      : buildLegacyScript(command, shortId, outFile, errFile, doneFile, esc);
   fs.writeFileSync(scriptFile, script, "utf8");
 
   let jobStderr = "";
@@ -422,25 +451,29 @@ app.post("/api/install-graph", (req, res) => {
 // ── Connect Graph (interactive browser OR device code) ──────────────
 app.post("/api/connect/graph", (req, res) => {
   const { account, tenantId, useDeviceCode } = req.body || {};
-  const deviceCode = useDeviceCode || DOCKER_MODE;
-  log(`CONNECT GRAPH: account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${deviceCode}`);
-  audit(req, "connect.graph", { account: account || null, tenantId: tenantId || null, deviceCode });
+  const useDevCode = useDeviceCode || DOCKER_MODE;
+  deviceCode = null; // clear any stale prompt from a prior attempt
+  log(`CONNECT GRAPH: account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${useDevCode}`);
+  audit(req, "connect.graph", { account: account || null, tenantId: tenantId || null, deviceCode: useDevCode });
 
   const scopes = ["User.Read.All", "Group.Read.All", "Directory.Read.All", "Organization.Read.All", "AuditLog.Read.All", "Reports.Read.All", "Policy.Read.All", "RoleManagement.Read.Directory", "Sites.Read.All", "IdentityRiskyUser.Read.All", "DeviceManagementManagedDevices.Read.All", "DeviceManagementConfiguration.Read.All"];
   let args = `-Scopes "${scopes.join('","')}"`;
   if (tenantId && tenantId.trim()) args += ` -TenantId "${tenantId.replace(/[`$"'{}();&|]/g, "")}"`;
-  if (deviceCode) args += ` -UseDeviceAuthentication`;
+  if (useDevCode) args += ` -UseDeviceAuthentication`;
   const safeAcct = account ? account.replace(/[`$"'{}();&|]/g, "") : "";
 
   const jobId = uuidv4();
-  const cmd = `try { Disconnect-MgGraph -EA SilentlyContinue } catch {}\n${safeAcct ? `$env:AZURE_USERNAME = "${safeAcct}"` : ""}\nConnect-MgGraph ${args} -ErrorAction Stop | Out-Null\n$ctx = Get-MgContext\n[PSCustomObject]@{Account=$ctx.Account;TenantId=$ctx.TenantId;Scopes=($ctx.Scopes -join ", ")}|ConvertTo-Json -Compress`;
+  // Run raw (no output capture / no Out-Null) so the device-code prompt streams
+  // to stdout live; the context result is written to the job out-file instead.
+  const cmd = `try { Disconnect-MgGraph -EA SilentlyContinue } catch {}\n${safeAcct ? `$env:AZURE_USERNAME = "${safeAcct}"\n` : ""}Connect-MgGraph ${args} -ErrorAction Stop\n$ctx = Get-MgContext\n[PSCustomObject]@{Account=$ctx.Account;TenantId=$ctx.TenantId;Scopes=($ctx.Scopes -join ", ")} | ConvertTo-Json -Compress | Out-File -FilePath '__OUTFILE__' -Encoding utf8`;
 
-  runInSession(cmd, jobId, { timeout: deviceCode ? 300000 : 120000 });
+  runInSession(cmd, jobId, { timeout: useDevCode ? 300000 : 120000, raw: true });
 
   const iv = setInterval(() => {
     const j = jobs.get(jobId);
     if (j && j.status !== "running" && j.status !== "queued") {
       clearInterval(iv);
+      deviceCode = null; // sign-in resolved (success or timeout); drop the prompt
       log(`CONNECT GRAPH done: ${j.status}`);
       if (j.output.trim()) {
         const raw = j.output.trim();
@@ -487,6 +520,7 @@ app.post("/api/disconnect", (req, res) => {
   runInSession(`try{Disconnect-MgGraph -EA SilentlyContinue}catch{}\ntry{Disconnect-ExchangeOnline -Confirm:$false -EA SilentlyContinue}catch{}\n[PSCustomObject]@{status='disconnected'}|ConvertTo-Json -Compress`, jobId);
   connectionInfo = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null };
   entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
+  deviceCode = null;
   res.json({ jobId });
 });
 
@@ -540,7 +574,7 @@ app.post("/api/run", (req, res) => {
 app.get("/api/job/:jobId", (req, res) => {
   const s = jobs.get(req.params.jobId);
   if (!s) return res.status(404).json({ error: "Job not found — the run request may have been rejected (check server logs)" });
-  res.json({ status: s.status, output: s.output, error: s.error ? s.error.replace(/\x1b\[[0-9;]*m/g, "") : "", info: s.info || "", startedAt: s.startedAt, completedAt: s.completedAt });
+  res.json({ status: s.status, output: s.output, error: s.error ? s.error.replace(/\x1b\[[0-9;]*m/g, "") : "", info: s.info || "", startedAt: s.startedAt, completedAt: s.completedAt, deviceCode });
 });
 
 app.post("/api/export", (req, res) => {

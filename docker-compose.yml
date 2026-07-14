@@ -1,16 +1,19 @@
-version: "3.8"
-
 # Local container validation with the same image that ships to Azure
 # Container Apps. DOCKER_MODE binds 0.0.0.0 inside the container and switches
 # Graph connect to device-code auth (watch the container logs for the code):
 #   docker compose up --build
 #   # then open http://localhost:3365 and connect
+#
+# HOST_PORT overrides the published host port without editing this file — set
+# it when the native app is already running on 3365, e.g.:
+#   HOST_PORT=13365 docker compose up --build   # then open http://localhost:13365
 services:
   m365-reports:
     build: .
     container_name: m365-admin-reports
     ports:
-      - "3365:3365"
+      # Host port is overridable via HOST_PORT (defaults to 3365).
+      - "${HOST_PORT:-3365}:3365"
     environment:
       - DOCKER_MODE=1
       - PORT=3365
