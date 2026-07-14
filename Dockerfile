@@ -84,29 +84,46 @@ RUN pwsh -NoProfile -NonInteractive -Command ' \
 # ── Application setup ────────────────────────────────────────────────
 WORKDIR /app
 
-# Copy package files first (better Docker layer caching)
-COPY package.json ./
-RUN npm install --production
+# Copy manifest + lockfile first for reproducible, cache-friendly installs.
+COPY package.json package-lock.json ./
+# npm ci installs exactly what the lockfile pins (reproducible builds).
+# --omit=dev drops devDependencies; @babel/standalone is a runtime dep
+# (the server transforms the frontend at request time), so it is retained.
+RUN npm ci --omit=dev
 
-# Copy application code
-COPY server.js ./
+# Copy application code. server.js require()s every module below, so all of
+# them must be present in the image (the pre-v11 Dockerfile copied only
+# server.js + public/, which no longer boots after the module split).
+COPY server.js reports.js packs.js snapshots.js audit.js ./
+COPY scripts/ ./scripts/
 COPY public/ ./public/
+COPY config.json.example ./
+# The tenant list (config.json) is intentionally NOT baked into the image.
+# Supply it at runtime via the mounted DATA volume or an env-driven config;
+# see deploy/README.md.
 
-# Create temp and export directories
-RUN mkdir -p /tmp/m365-admin-reports /app/M365Reports
+# ── Persistent data volume ───────────────────────────────────────────
+# DATA_DIR holds all durable state (snapshots, audit log, console logs, CSV
+# exports). In Azure Container Apps this path is backed by an Azure Files
+# mount so state survives restarts and scale-to-zero. Created and owned by
+# the non-root runtime user below.
+ENV DATA_DIR=/app/data
+RUN mkdir -p /app/data /tmp/m365-admin-reports
 
 # ── Runtime config ───────────────────────────────────────────────────
 ENV PORT=3365
 ENV NODE_ENV=production
+# DOCKER_MODE (set at the top of this file) binds 0.0.0.0 and switches Graph
+# connect to device-code auth — required inside a container.
 EXPOSE 3365
 
 # Health check for Azure Container Apps
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:3365/api/health || exit 1
 
-# Run as non-root for security
+# Run as non-root for security. Own /app, the data volume, and the temp dir.
 RUN groupadd -r m365app && useradd -r -g m365app -d /app m365app \
-    && chown -R m365app:m365app /app /tmp/m365-admin-reports
+    && chown -R m365app:m365app /app /app/data /tmp/m365-admin-reports
 USER m365app
 
 CMD ["node", "server.js"]

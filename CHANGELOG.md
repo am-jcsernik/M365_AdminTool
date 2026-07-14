@@ -4,6 +4,47 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [11.12.0] — 2026-07-14
+
+### Added
+- **Azure Container Apps deployment support** (`deploy/`):
+  - `main.bicep` — declarative infrastructure: Log Analytics workspace,
+    Container Apps environment, an Azure Files share linked as the `DATA_DIR`
+    volume, and the Container App with external ingress (TLS at the edge),
+    scale-to-zero (`minReplicas 0` / `maxReplicas 1`), and a `/api/health`
+    liveness probe.
+  - `Deploy-ToAca.ps1` — PS 7 orchestration wrapper: prereq checks, resource
+    group, ACR + server-side `az acr build`, storage/file-share, Bicep deploy,
+    and **Entra Easy Auth** as the ingress gate (restricted to the home
+    tenant) — the access control that makes public exposure acceptable ahead
+    of v12 RBAC.
+  - `deploy/README.md` — deployment guide covering the security posture, the
+    two independent auth layers (ingress gate vs. Graph/EXO connect), the
+    scale-to-zero re-auth tradeoff, and persistent storage.
+- **`DATA_DIR` environment variable** — relocates all durable state
+  (`M365Snapshots/`, `M365AuditLog/`, `M365Logs/`, `M365Reports/`) under a
+  single configurable root. Defaults to `process.cwd()`, so local runs are
+  unchanged; in a container it points at the mounted Azure Files volume so
+  state survives restarts and scale-to-zero. (`server.js`, `audit.js`,
+  `snapshots.js`.)
+
+### Fixed
+- **Dockerfile no longer boots a broken image.** It now copies every module
+  `server.js` requires (`reports.js`, `packs.js`, `snapshots.js`, `audit.js`,
+  `scripts/`) — the pre-v11 Dockerfile copied only `server.js` + `public/` and
+  would crash on startup after the module split. Also switched to
+  `npm ci --omit=dev` (reproducible, lockfile-pinned) and created the
+  non-root-owned `/app/data` volume mount point.
+
+### Changed
+- `docker-compose.yml` mounts a single `./data` volume at `DATA_DIR` for local
+  parity with the ACA Azure Files mount, and documents the local device-code
+  validation flow.
+- `.dockerignore` hardened to exclude `config.json`, all runtime state dirs,
+  and `deploy/` / `Handoff/` from the build context.
+- `docs/ARCHITECTURE.md` filled in with the full system shape and the ACA
+  deployment target.
+
 ## [11.11.0] — 2026-07-10
 
 ### Changed

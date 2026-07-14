@@ -57,6 +57,15 @@ try {
 } catch (e) { console.error("  config.json invalid:", e.message); }
 app.use(express.json({ limit: "2mb" }));
 
+// ── Persistent data directory ────────────────────────────────────────
+// All durable state (snapshots, audit log, console logs, CSV exports) lives
+// under DATA_DIR. Defaults to the working directory so local runs behave
+// exactly as before; in a container, point DATA_DIR at a mounted volume
+// (e.g. Azure Files) so state survives restarts and scale-to-zero.
+// TEMP_DIR (below) is deliberately NOT under DATA_DIR — it is ephemeral IPC
+// scratch and belongs on fast local/ephemeral storage.
+const DATA_DIR = process.env.DATA_DIR || process.cwd();
+
 // ── Temp directory ──────────────────────────────────────────────────
 const TEMP_DIR = path.join(os.tmpdir(), "m365-admin-reports");
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -74,7 +83,7 @@ const diagLog = [];
 // Console/diagnostic log: kept in memory for the Debug panel AND appended
 // to ./M365Logs/console-YYYY-MM.log — container console output (e.g. Azure
 // Container Apps) is ephemeral, files on a mounted volume are not.
-const LOGS_DIR = path.join(process.cwd(), "M365Logs");
+const LOGS_DIR = path.join(DATA_DIR, "M365Logs");
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 23);
   const line = `[${ts}] ${msg}`;
@@ -537,7 +546,7 @@ app.get("/api/job/:jobId", (req, res) => {
 app.post("/api/export", (req, res) => {
   const { data, filename } = req.body;
   if (!data) return res.status(400).json({ error: "No data" });
-  const dir = path.join(process.cwd(), "M365Reports");
+  const dir = path.join(DATA_DIR, "M365Reports");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const file = path.join(dir, `${filename || "report"}_${ts}.csv`);

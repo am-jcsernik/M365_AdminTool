@@ -23,6 +23,8 @@ M365Snapshots/
 M365AuditLog/
 M365Logs/
 M365Reports/
+# Local docker-compose DATA_DIR volume (container runtime state)
+/data/
 
 # Session transfer / build-artifact staging (tarballs + handoff notes)
 Handoff/

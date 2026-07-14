@@ -4,7 +4,17 @@ npm-debug.log
 .gitignore
 *.md
 !README.md
-M365Reports/
-M365AdminReports.ps1
+# Tenant list / secrets — never bake into the image
+config.json
 .env
+.env.*
+# Runtime state (belongs on the mounted DATA volume, not the image)
+M365Reports/
+M365Snapshots/
+M365AuditLog/
+M365Logs/
+# Not needed at runtime
+M365AdminReports.ps1
+deploy/
+Handoff/
 .DS_Store

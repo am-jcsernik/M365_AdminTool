@@ -17,7 +17,9 @@
 const fs = require("fs");
 const path = require("path");
 
-const AUDIT_DIR = path.join(process.cwd(), "M365AuditLog");
+// DATA_DIR relocates durable state to a mounted volume in containers;
+// defaults to the working directory so local runs are unchanged.
+const AUDIT_DIR = path.join(process.env.DATA_DIR || process.cwd(), "M365AuditLog");
 
 // The server registers a function returning the current acting identity
 // (today: the connected Graph account; post-RBAC: the signed-in user).

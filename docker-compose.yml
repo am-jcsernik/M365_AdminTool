@@ -1,5 +1,10 @@
 version: "3.8"
 
+# Local container validation with the same image that ships to Azure
+# Container Apps. DOCKER_MODE binds 0.0.0.0 inside the container and switches
+# Graph connect to device-code auth (watch the container logs for the code):
+#   docker compose up --build
+#   # then open http://localhost:3365 and connect
 services:
   m365-reports:
     build: .
@@ -9,9 +14,16 @@ services:
     environment:
       - DOCKER_MODE=1
       - PORT=3365
+      # All durable state lives under DATA_DIR (mirrors the ACA Azure Files
+      # mount). Kept in sync with the volume mount target below.
+      - DATA_DIR=/app/data
     volumes:
-      # Persist exported CSV reports
-      - ./M365Reports:/app/M365Reports
+      # Single persistent volume for snapshots, audit log, console logs and
+      # CSV exports — the local stand-in for the ACA Azure Files share.
+      - ./data:/app/data
+      # Optional: provide a real tenant list without baking it into the image.
+      # Uncomment and drop a config.json next to this file to use it.
+      # - ./config.json:/app/config.json:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3365/api/health"]

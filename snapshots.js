@@ -18,7 +18,9 @@ const fs = require("fs");
 const path = require("path");
 const { randomUUID } = require("crypto");
 
-const SNAP_DIR = path.join(process.cwd(), "M365Snapshots");
+// DATA_DIR relocates durable state to a mounted volume in containers;
+// defaults to the working directory so local runs are unchanged.
+const SNAP_DIR = path.join(process.env.DATA_DIR || process.cwd(), "M365Snapshots");
 
 // Explicit key columns for reports where the heuristic could mislead.
 const KEY_COLUMNS = {
