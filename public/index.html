@@ -192,7 +192,7 @@ function ConnectBanner({connecting,startedAt,useDevCode,inCard,deviceCode}){cons
   const what=connecting==="graph"?"Microsoft Graph":"Exchange Online";
   // When a device code has been surfaced, show the link + code prominently so
   // the operator never has to read the server/container console.
-  const codeBlock=deviceCode&&connecting==="graph"?React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,padding:"10px 14px",background:"rgba(245,158,11,.1)",border:"1px solid rgba(245,158,11,.4)",borderRadius:6,marginTop:8,fontSize:12,fontFamily:M,color:"var(--fg)"}},
+  const codeBlock=deviceCode?React.createElement("div",{style:{display:"flex",flexDirection:"column",gap:6,padding:"10px 14px",background:"rgba(245,158,11,.1)",border:"1px solid rgba(245,158,11,.4)",borderRadius:6,marginTop:8,fontSize:12,fontFamily:M,color:"var(--fg)"}},
     React.createElement("span",null,"Device-code sign-in \u2014 open the link and enter this code:"),
     React.createElement("div",{style:{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}},
       React.createElement("a",{href:deviceCode.url,target:"_blank",rel:"noopener noreferrer",style:{color:"#60a5fa"}},deviceCode.url),
@@ -202,7 +202,7 @@ function ConnectBanner({connecting,startedAt,useDevCode,inCard,deviceCode}){cons
     React.createElement("div",{style:{display:"flex",gap:10,alignItems:"center",padding:"9px 14px",background:"rgba(59,130,246,.08)",border:"1px solid rgba(59,130,246,.25)",borderRadius:6,fontSize:12,fontFamily:M,color:"var(--fg2)"}},
       React.createElement("span",{className:"spin",style:{display:"inline-block",width:12,height:12,border:"2px solid rgba(96,165,250,.3)",borderTopColor:"#60a5fa",borderRadius:"50%"}}),
       React.createElement("span",null,`Connecting to ${what}\u2026 ${secs}s`),
-      React.createElement("span",{style:{color:"#f59e0b"}},useDevCode&&connecting==="graph"?(deviceCode?"Enter the code below to finish signing in.":"Device code flow: waiting for the sign-in code\u2026"):"A browser sign-in window should be open \u2014 if you don't see it, check behind other windows and on other monitors/taskbar. It times out after ~2 minutes.")),
+      React.createElement("span",{style:{color:"#f59e0b"}},useDevCode?(deviceCode?"Enter the code below to finish signing in.":"Device code flow: waiting for the sign-in code\u2026"):"A browser sign-in window should be open \u2014 if you don't see it, check behind other windows and on other monitors/taskbar. It times out after ~2 minutes.")),
     codeBlock);}
 
 // ── Tenant health dashboard ─────────────────────────────────────────
@@ -281,7 +281,7 @@ function App(){const[dark,setDark]=useState(true);const[search,setSearch]=useSta
   const connectG=async()=>{if(!psReady){alert("Graph modules not installed.");return;}setConn("graph");setDevCode(null);try{const{jobId}=await api.post("/api/connect/graph",{account:connAcct,tenantId:connTen,useDeviceCode:useDevCode});const r=await api.poll(jobId,x=>{if(x.deviceCode)setDevCode(x.deviceCode);});if(r.output&&r.output.trim()){setGO(true);setConnAs(connAcct||"connected");}if(r.error&&r.error.trim()&&(!r.output||!r.output.trim()))alert("Failed:\n"+r.error.trim());}catch(e){alert("Error: "+e.message);}setConn(null);setDevCode(null);await fetchLogs();};
   // Connect as current user — same interactive browser auth, no account specified
   const connectCurrent=async()=>{if(!psReady){alert("Graph modules not installed.");return;}setConn("graph");setDevCode(null);try{const{jobId}=await api.post("/api/connect/graph",{});const r=await api.poll(jobId,x=>{if(x.deviceCode)setDevCode(x.deviceCode);});if(r.output&&r.output.trim()){setGO(true);setConnAs("current user");}if(r.error&&r.error.trim()&&(!r.output||!r.output.trim()))alert("Failed:\n"+r.error.trim());}catch(e){alert(e.message);}setConn(null);setDevCode(null);await fetchLogs();};
-  const connectE=async()=>{setConn("exchange");try{const{jobId}=await api.post("/api/connect/exchange",{account:connAcct});const r=await api.poll(jobId);if(r.status==="completed"&&r.output.trim())setEO(true);else if(r.error)alert("Exchange failed:\n"+r.error.trim());}catch(e){alert(e.message);}setConn(null);};
+  const connectE=async()=>{setConn("exchange");setDevCode(null);try{const{jobId}=await api.post("/api/connect/exchange",{account:connAcct});const r=await api.poll(jobId,x=>{if(x.deviceCode)setDevCode(x.deviceCode);});if(r.status==="completed"&&r.output.trim())setEO(true);else if(r.error)alert("Exchange failed:\n"+r.error.trim());}catch(e){alert(e.message);}setConn(null);setDevCode(null);};
   const disco=async()=>{await api.post("/api/disconnect");setGO(false);setEO(false);setConnAs(null);};
   const restartSess=async()=>{await api.post("/api/restart-session");setGO(false);setEO(false);setConnAs(null);setSA(false);};
 
@@ -301,7 +301,7 @@ function App(){const[dark,setDark]=useState(true);const[search,setSearch]=useSta
       graphOk&&React.createElement("button",{onClick:disco,style:{background:"var(--card-h)",border:"1px solid var(--border)",color:"var(--err)",padding:"5px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:S}},"Disconnect"),
       sessAlive&&React.createElement("button",{onClick:restartSess,style:{background:"var(--card-h)",border:"1px solid var(--border)",color:"var(--fg3)",padding:"5px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:S}},"Restart"),
       React.createElement("button",{onClick:()=>setDark(!dark),style:{background:"var(--card-h)",border:"1px solid var(--border)",color:"var(--fg2)",padding:"4px 8px",borderRadius:5,cursor:"pointer",fontSize:12}},dark?React.createElement(Icon,{name:"sun",size:14}):React.createElement(Icon,{name:"moon",size:14})))),
-    connecting==="exchange"&&React.createElement("div",{style:{padding:"10px 24px 0"}},React.createElement(ConnectBanner,{connecting,startedAt:connStart,useDevCode})),
+    connecting==="exchange"&&React.createElement("div",{style:{padding:"10px 24px 0"}},React.createElement(ConnectBanner,{connecting,startedAt:connStart,useDevCode,deviceCode:devCode})),
 
   React.createElement("div",{style:{padding:"12px 24px 0"}},
     // ── PS ENVIRONMENT ──

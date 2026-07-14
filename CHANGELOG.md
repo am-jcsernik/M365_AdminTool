@@ -4,6 +4,19 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [11.12.2] — 2026-07-14
+
+### Fixed
+- **Exchange Online sign-in now works in the container / ACA.**
+  `Connect-ExchangeOnline` defaulted to interactive browser auth and failed in
+  the headless Linux container with "Unable to open a web page using xdg-open,
+  gnome-open, kfmclient or wslview tools." In `DOCKER_MODE` it now passes
+  `-Device` (probed, EXO 3.x) for device-code auth and runs in the raw
+  passthrough mode added in 11.12.1, so the device-code prompt streams to the
+  UI just like the Graph connect. Verified in-container: the code surfaces in
+  the job status. The device-code prompt is now shown in the connect banner for
+  both Graph and Exchange.
+
 ## [11.12.1] — 2026-07-14
 
 ### Fixed

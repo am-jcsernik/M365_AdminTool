@@ -1,6 +1,6 @@
 # M365 Admin Reports
 
-**Version 11.12.1** — see [CHANGELOG.md](CHANGELOG.md) for version history.
+**Version 11.12.2** — see [CHANGELOG.md](CHANGELOG.md) for version history.
 
 Read-only Microsoft 365 admin reporting tool with a web UI. Runs PowerShell
 Graph SDK commands through a persistent session and renders results as

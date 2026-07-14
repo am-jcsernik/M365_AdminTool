@@ -491,26 +491,32 @@ app.post("/api/connect/graph", (req, res) => {
 // ── Connect Exchange ────────────────────────────────────────────────
 app.post("/api/connect/exchange", (req, res) => {
   const { account } = req.body || {};
+  const useDevCode = DOCKER_MODE;
   const upn = account ? account.replace(/[`$"'{}();&|]/g, "") : "";
-  audit(req, "connect.exchange", { account: upn || null });
+  deviceCode = null; // clear any stale prompt from a prior attempt
+  audit(req, "connect.exchange", { account: upn || null, deviceCode: useDevCode });
   const jobId = uuidv4();
   // -DisableWAM (EXO 3.7+) skips the WAM broker path whose
   // WithBroker(BrokerOptions) overload is missing when the Graph SDK has
   // already loaded a different Microsoft.Identity.Client into the session.
-  // Probed at runtime so older module versions still work.
+  // -Device (EXO 3.x) uses device-code auth instead of launching a browser —
+  // required in a headless container, where xdg-open/gnome-open don't exist.
+  // Both are probed so older module versions still work. Runs raw so the
+  // device-code prompt streams to stdout (surfaced to the UI), and the result
+  // is written to the job out-file.
   const cmd = `$exoCmd = Get-Command Connect-ExchangeOnline -ErrorAction Stop
 $exoParams = @{ ShowBanner = $false; ErrorAction = 'Stop' }
 if ($exoCmd.Parameters.ContainsKey('DisableWAM')) { $exoParams['DisableWAM'] = $true }
-${upn ? `$exoParams['UserPrincipalName'] = '${upn}'\n` : ""}try {
+${useDevCode ? `if ($exoCmd.Parameters.ContainsKey('Device')) { $exoParams['Device'] = $true }\n` : ""}${upn ? `$exoParams['UserPrincipalName'] = '${upn}'\n` : ""}try {
   Connect-ExchangeOnline @exoParams
-  [PSCustomObject]@{status='connected'}|ConvertTo-Json -Compress
+  [PSCustomObject]@{status='connected'} | ConvertTo-Json -Compress | Out-File -FilePath '__OUTFILE__' -Encoding utf8
 } catch {
   if ($_.Exception.Message -like '*WithBroker*' -or $_.Exception.Message -like '*Method not found*') {
     throw ("MSAL assembly conflict between the Graph SDK and ExchangeOnlineManagement in this session. Fixes, in order: (1) Restart Session, then connect EXCHANGE FIRST, then Graph. (2) Update both modules in an elevated PowerShell: Update-Module ExchangeOnlineManagement -Force; Update-Module Microsoft.Graph -Force; then restart the server. Original error: " + $_.Exception.Message)
   } else { throw }
 }`;
-  runInSession(cmd, jobId, { timeout: 120000 });
-  const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output.trim()) connectionInfo.exchangeConnected = true; } }, 500);
+  runInSession(cmd, jobId, { timeout: useDevCode ? 300000 : 120000, raw: true });
+  const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); deviceCode = null; if (j.status === "completed" && j.output.trim()) connectionInfo.exchangeConnected = true; } }, 500);
   res.json({ jobId });
 });
 
