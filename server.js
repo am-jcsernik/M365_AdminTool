@@ -31,7 +31,7 @@ const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const os = require("os");
-const { REPORTS, findReport, buildCommand } = require("./reports.js");
+const { REPORTS, findReport, buildCommand, allAreas } = require("./reports.js");
 const { saveSnapshot, listSnapshots, loadSnapshot, deleteSnapshot, diffRows } = require("./snapshots.js");
 const { audit, readAudit, setConnectionIdentityProvider } = require("./audit.js");
 const { PACKS, findPack } = require("./packs.js");
@@ -942,14 +942,170 @@ app.get("/api/dashboard", async (req, res) => {
 
 // ── Config & audit ──────────────────────────────────────────────────
 app.get("/api/config", (req, res) => {
+  const store = rbac.getStore();
   // Only the tenants the caller may reach (friendly-name dropdown source).
-  const tenants = rbac.allowedTenants(req.user, rbac.getStore())
+  const tenants = rbac.allowedTenants(req.user, store)
     .map(t => ({ id: t.id, name: t.name, tenantId: t.tenantId }));
-  res.json({ tenants });
+  // admin flag drives whether the client renders the admin (access-control) UI;
+  // every admin route is independently server-gated by requireAdmin regardless.
+  res.json({ tenants, admin: rbac.isAdmin(req.user, store) });
 });
 app.get("/api/audit", requireAdmin, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
   res.json({ entries: readAudit(limit) });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+//  v12 RBAC Phase 5 — admin management API (admin-gated CRUD over the store)
+//
+//  Every route below is guarded by requireAdmin and writes through
+//  rbac.saveStore (atomic temp-file + rename). Mutations clone the cached
+//  store so the in-memory cache is never edited in place; the mtime-cache in
+//  rbac.js reloads the fresh copy on the next read, so edits take effect live.
+//  Writes are serialized by Node's single-threaded event loop + the atomic
+//  rename; the single-admin-writer assumption from Phase 2 still holds.
+// ══════════════════════════════════════════════════════════════════════
+
+// The report catalog the role editor needs: areas, each with its report ids.
+function adminCatalog() {
+  return REPORTS.map(c => ({ area: c.category, items: c.items.map(i => ({ id: i.id, name: i.name })) }));
+}
+
+// Derive a stable slug (mirrors rbac.js's internal slug()).
+const adminSlug = (s) => (s ? String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") : "");
+
+// Load → clone → mutate → save, with uniform error handling. `fn(next)` mutates
+// the clone and returns the response payload (or throws a message for a 400).
+function mutateStore(req, res, action, fn) {
+  let store;
+  try { store = rbac.getStore(); } catch (e) { return res.status(500).json({ error: `Store unavailable: ${e.message}` }); }
+  const next = JSON.parse(JSON.stringify(store));
+  let payload;
+  try { payload = fn(next); } catch (e) { return res.status(400).json({ error: e.message }); }
+  try { rbac.saveStore(next); } catch (e) { return res.status(500).json({ error: `Save failed: ${e.message}` }); }
+  audit(req, action, payload && payload.__audit ? payload.__audit : {});
+  if (payload && payload.__audit) delete payload.__audit;
+  return res.json(payload || { ok: true });
+}
+
+// Normalize a role's tenant scope: "*" (all) or an array of tenant slugs.
+function normTenants(t) {
+  if (t === "*") return "*";
+  return Array.isArray(t) ? [...new Set(t.map(String).filter(Boolean))] : [];
+}
+// Normalize a role's report scope: "*" (all) or { areas: "*"|[], ids: [] }.
+function normReports(r) {
+  if (r === "*" || (r && r.areas === "*")) return "*";
+  if (r && typeof r === "object") {
+    return {
+      areas: Array.isArray(r.areas) ? [...new Set(r.areas.map(String).filter(Boolean))] : [],
+      ids: Array.isArray(r.ids) ? [...new Set(r.ids.map(String).filter(Boolean))] : [],
+    };
+  }
+  return { areas: [], ids: [] }; // default-deny: no explicit grant → nothing
+}
+
+// Full authZ model + the catalog metadata the role editor renders from.
+app.get("/api/admin/store", requireAdmin, (req, res) => {
+  const s = rbac.getStore();
+  res.json({
+    accessGroupId: s.accessGroupId || "",
+    adminGroupId: s.adminGroupId || "",
+    tenants: s.tenants || [],
+    roles: s.roles || [],
+    assignments: s.assignments || [],
+    catalog: adminCatalog(),
+    areas: allAreas(),
+  });
+});
+
+// ── Tenants ───────────────────────────────────────────────────────────
+app.post("/api/admin/tenants", requireAdmin, (req, res) => {
+  const { id, name, tenantId, clientId, certSecret } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: "Tenant name is required" });
+  mutateStore(req, res, "admin.tenant.save", (s) => {
+    const sid = (id && String(id).trim()) || adminSlug(name);
+    if (!sid) throw new Error("Could not derive a tenant id from the name");
+    const entry = {
+      id: sid, name: String(name).trim(),
+      tenantId: (tenantId && String(tenantId).trim()) || null,
+      clientId: (clientId && String(clientId).trim()) || null,
+      certSecret: (certSecret && String(certSecret).trim()) || null,
+    };
+    const i = s.tenants.findIndex(t => t.id === sid);
+    if (i >= 0) s.tenants[i] = entry; else s.tenants.push(entry);
+    // Return a copy (not the stored object) so the audit marker never persists.
+    return { ...entry, __audit: { id: sid, updated: i >= 0 } };
+  });
+});
+
+app.delete("/api/admin/tenants/:id", requireAdmin, (req, res) => {
+  mutateStore(req, res, "admin.tenant.delete", (s) => {
+    const id = req.params.id;
+    s.tenants = (s.tenants || []).filter(t => t.id !== id);
+    // Scrub the deleted tenant from any role that scoped to it.
+    for (const r of s.roles || []) if (Array.isArray(r.tenants)) r.tenants = r.tenants.filter(t => t !== id);
+    return { ok: true, id, __audit: { id } };
+  });
+});
+
+// ── Roles ─────────────────────────────────────────────────────────────
+app.post("/api/admin/roles", requireAdmin, (req, res) => {
+  const { id, name, tenants: rt, reports } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: "Role name is required" });
+  mutateStore(req, res, "admin.role.save", (s) => {
+    const sid = (id && String(id).trim()) || adminSlug(name);
+    if (!sid) throw new Error("Could not derive a role id from the name");
+    const entry = { id: sid, name: String(name).trim(), tenants: normTenants(rt), reports: normReports(reports) };
+    const i = s.roles.findIndex(r => r.id === sid);
+    if (i >= 0) s.roles[i] = entry; else s.roles.push(entry);
+    return { ...entry, __audit: { id: sid, updated: i >= 0 } };
+  });
+});
+
+app.delete("/api/admin/roles/:id", requireAdmin, (req, res) => {
+  mutateStore(req, res, "admin.role.delete", (s) => {
+    const id = req.params.id;
+    s.roles = (s.roles || []).filter(r => r.id !== id);
+    // Scrub the deleted role from every assignment that granted it.
+    for (const a of s.assignments || []) if (Array.isArray(a.roles)) a.roles = a.roles.filter(x => x !== id);
+    return { ok: true, id, __audit: { id } };
+  });
+});
+
+// ── Assignments (user/group → roles) ──────────────────────────────────
+app.post("/api/admin/assignments", requireAdmin, (req, res) => {
+  const { principalType, principal, roles } = req.body || {};
+  if (principalType !== "user" && principalType !== "group")
+    return res.status(400).json({ error: "principalType must be 'user' or 'group'" });
+  if (!principal || !String(principal).trim()) return res.status(400).json({ error: "A principal (UPN or group object id) is required" });
+  mutateStore(req, res, "admin.assignment.save", (s) => {
+    const p = String(principal).trim();
+    const entry = { principalType, principal: p, roles: Array.isArray(roles) ? [...new Set(roles.map(String).filter(Boolean))] : [] };
+    const i = (s.assignments || []).findIndex(a => a.principalType === principalType && String(a.principal).toLowerCase() === p.toLowerCase());
+    if (i >= 0) s.assignments[i] = entry; else s.assignments.push(entry);
+    return { ...entry, __audit: { principalType, principal: p, roles: entry.roles, updated: i >= 0 } };
+  });
+});
+
+app.delete("/api/admin/assignments/:principalType/:principal", requireAdmin, (req, res) => {
+  mutateStore(req, res, "admin.assignment.delete", (s) => {
+    const pt = req.params.principalType;
+    const p = decodeURIComponent(req.params.principal).toLowerCase();
+    s.assignments = (s.assignments || []).filter(a => !(a.principalType === pt && String(a.principal).toLowerCase() === p));
+    return { ok: true, __audit: { principalType: pt, principal: p } };
+  });
+});
+
+// ── Bootstrap group ids (overall-access gate + admin bootstrap) ───────
+app.put("/api/admin/groups", requireAdmin, (req, res) => {
+  const { accessGroupId, adminGroupId } = req.body || {};
+  const clean = (v) => (v && String(v).trim() ? String(v).trim() : null);
+  mutateStore(req, res, "admin.groups.save", (s) => {
+    s.accessGroupId = clean(accessGroupId);
+    s.adminGroupId = clean(adminGroupId);
+    return { accessGroupId: s.accessGroupId, adminGroupId: s.adminGroupId, __audit: { accessGroupId: s.accessGroupId, adminGroupId: s.adminGroupId } };
+  });
 });
 
 // ── Static ──────────────────────────────────────────────────────────

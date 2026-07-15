@@ -1,7 +1,21 @@
 # Permissions Matrix — M365 Admin Reports
 
-Every report is read-only. The Graph connection requests these delegated
-scopes (see `server.js`, `/api/connect/graph`):
+Every report is read-only. The tool connects in one of two modes:
+
+- **Delegated** (local dev, device-code, "Connect as current user") — acts *as
+  the signed-in operator*; the effective access is the intersection of the
+  requested scopes and what that operator is granted. This is the matrix below.
+- **App-only certificate** (v12, unattended/cloud per tenant) — acts *as the app
+  service principal*, bounded by the tenant's admin-consented **application**
+  permissions, not by any user's rights. See "Application (app-only) permissions".
+
+Both are read-only: `isSafe` blocks mutating cmdlets and `Invoke-MgGraphRequest`
+is GET-only regardless of connection mode.
+
+## Delegated scopes
+
+The Graph connection requests these delegated scopes (see `server.js`,
+`/api/connect/graph`):
 
     User.Read.All, Group.Read.All, Directory.Read.All, Organization.Read.All,
     AuditLog.Read.All, Reports.Read.All, Policy.Read.All,
@@ -65,3 +79,37 @@ Delegated-permission quirks worth knowing:
   `Reports.Read.All` with admin consent.
 - Risky Users returns an error without an Azure AD Premium P2 license — that
   is a licensing condition, not a bug.
+
+## Application (app-only) permissions — v12 per-tenant certificate auth
+
+Under app-only auth the tool authenticates as a per-tenant Entra **app
+registration** with a certificate in Key Vault (fetched at connect time via the
+Container App's managed identity). It acts as the app, so access is governed by
+**application** permissions with **admin consent** — independent of any user.
+
+Grant these application permissions on the app registration (Phase 0
+provisioning; `deploy/Provision-RbacPhase0.ps1` requests and consents them):
+
+    User.Read.All, Group.Read.All, Directory.Read.All, Organization.Read.All,
+    AuditLog.Read.All, Reports.Read.All, Policy.Read.All,
+    RoleManagement.Read.All, Sites.Read.All,
+    DeviceManagementManagedDevices.Read.All,
+    DeviceManagementConfiguration.Read.All
+
+For Exchange reports under app-only:
+- Grant the **Office 365 Exchange Online → `Exchange.ManageAsApp`** application
+  permission **and** assign the app's service principal an Exchange RBAC role
+  (e.g. **View-Only Organization Management**) in Exchange Online. This is a
+  manual EXO step — application permission alone is not sufficient.
+
+Notes:
+- `RoleManagement.Read.All` (application) is the app-only counterpart of the
+  delegated `RoleManagement.Read.Directory`.
+- App-only does **not** impersonate a user. To narrow it below "all X in the
+  tenant", use **Graph RBAC for Applications** (scoped app role assignments) or,
+  for mail, an **Exchange Application Access Policy** — the tool does not do this
+  for you.
+- `GET /sites/getAllSites` works under application permissions, so app-only can
+  enumerate every site (the delegated `search` workaround is not needed).
+- Certificates live in Key Vault and are read only by the managed identity;
+  the RBAC store holds only a `kv:` reference, never key material.

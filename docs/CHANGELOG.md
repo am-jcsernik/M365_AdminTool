@@ -3,11 +3,10 @@
 All notable changes to deliverables in this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [12.0.0] — 2026-07-15
 ### Added
-- **v12 multi-user RBAC — in progress on `feature/v12-rbac`** (ships as one
-  major version, **v12.0.0**, at Phase 6; not yet released). Three access tiers:
-  who may use the tool → which tenants → which reports/areas.
+- **v12 multi-user RBAC** (one major version on `feature/v12-rbac`). Three access
+  tiers: who may use the tool → which tenants → which reports/areas.
   - **Phase 0 (infra):** Key Vault, app managed identity, Entra access/admin
     groups, per-tenant app-only app registration + KV certificate + admin
     consent. Idempotent `deploy/Provision-RbacPhase0.ps1`; gated Bicep additions.
@@ -22,6 +21,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [
   - **Phase 4a (connection):** app-only certificate connect per tenant, cert
     fetched from Key Vault via the managed identity (`keyvault.js`, `tenants.js`);
     device code retained as default/fallback.
+  - **Phase 5 (admin UI):** admin-gated **Access Control** panel in
+    `public/index.html` (tenants, roles, assignments, bootstrap group ids) +
+    `requireAdmin` CRUD API under `/api/admin/*`, writing atomically via
+    `rbac.saveStore`; deletes cascade; `/api/config` exposes an `admin` flag.
+  - **Phase 6 (release):** integration test suite (`test/`, `npm test`) covering
+    the guard matrix offline; docs refreshed (`README.md`, `PERMISSIONS.md`,
+    `docs/ARCHITECTURE.md`); bumped to **v12.0.0**.
+  - **Deferred:** Phase 4b (concurrent per-tenant pool + `maxReplicas` lift) and
+    the group-claim overage fallback.
 - Initial project scaffold.
 
 ### Fixed

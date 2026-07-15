@@ -69,18 +69,56 @@ Target: a single long-running **Container App** (not a Job). See `deploy/`
   (`Dockerfile`, `DOCKER_MODE=1`, non-root user, `/api/health` HEALTHCHECK).
 - **Ingress** — external, target port 3365, TLS terminated at the platform edge
   (`allowInsecure=false`); the app itself speaks plain HTTP inside the env.
-- **Ingress gate** — Entra **Easy Auth**, restricted to the home tenant. This
-  is the access gate until app-level RBAC (v12) exists; see `RBAC-ROADMAP.md`.
-- **Graph/EXO auth** — in-container **device-code** flow (`-UseDeviceAuthentication`,
-  triggered by `DOCKER_MODE`); the operator reads the code from container logs.
-  Independent of the ingress identity, so an operator can connect into a client
-  tenant after authenticating at the gate.
+- **Ingress gate** — Entra **Easy Auth**, restricted to the home tenant. This is
+  the *outer* gate (who reaches the app); **v12 RBAC** enforces authorization
+  *inside* it (which tenants/reports each caller may use). See below.
+- **Graph/EXO auth** — **app-only certificate** per tenant (v12 Phase 4a), with
+  the cert fetched from Key Vault via the Container App's managed identity at
+  connect time; in-container **device-code** remains the fallback (and the
+  admin-bootstrap path). Both are independent of the ingress identity, so an
+  operator/app can connect into a client tenant after passing the gate.
 - **Scale** — `minReplicas 0` (scale-to-zero) / `maxReplicas 1`. The single cap
-  is required because the authenticated session is one in-memory `pwsh` process;
-  cold starts require re-running the device-code connect. Durable state on the
-  Azure Files volume survives.
+  remains until the concurrent per-tenant connection pool ships (v12 **Phase 4b**,
+  deferred): the authenticated session is still one in-memory `pwsh` process.
+  Durable state on the Azure Files volume survives cold starts.
 - **Storage** — an Azure Files share linked to the environment and mounted at
   `DATA_DIR` (`/app/data`).
+
+## Authentication & authorization — v12 RBAC
+
+Three access tiers, default-deny throughout (ADR-0006/0007; `docs/PLAN-v12-rbac.md`):
+
+1. **Who may open the tool** — Entra **Easy Auth** at the ingress, plus an
+   in-tool **access gate**: the caller must be in a designated Entra *access
+   group* OR hold at least one role assignment. Everyone else gets 403.
+2. **Which tenants** — role assignments scope the caller to specific tenants
+   (or `*`). The tenant dropdown and connect routes are filtered/guarded to that set.
+3. **Which reports** — roles grant reports by **area** (category) and/or
+   individual **report id** (or `*`). `/api/reports`, `/api/run`, packs,
+   snapshots, diff and export are all filtered/guarded to the allowed set.
+
+Components:
+- **`auth.js`** — resolves the acting user from the `X-MS-CLIENT-PRINCIPAL*`
+  Easy Auth headers (trusted only when present; never on the local bind, where a
+  synthetic full-admin identity is used). Flags group-claim overage.
+- **`rbac.js`** — the writable store (`DATA_DIR/access/rbac.json`, non-secret
+  metadata only; mtime-cached, atomic writes) and the default-deny engine
+  (`can(user, {tenant?, reportId?})`, `isAdmin`, `hasToolAccess`, `allowedTenants`).
+- **`server.js`** — a `/api` access gate + per-route tenant/report guards +
+  admin-only management routes (`/api/admin/*`, `requireAdmin`). Every deny is audited.
+- **`public/index.html`** — an admin-gated **Access Control** panel (tenants,
+  roles, assignments, bootstrap group ids); non-admins never see it and are
+  refused server-side regardless.
+
+**Two identities on every action:** the *acting user* (Easy Auth) and the
+*connection identity* (the per-tenant app service principal), both recorded in
+the audit log. App-only auth acts *as the app* (bounded by its granted
+application permissions), not as the user — see `PERMISSIONS.md`.
+
+**Deploy-time invariant:** enforcement requires the bootstrap group ids
+(`ACCESS_GROUP_ID`/`ADMIN_GROUP_ID` env → seeded into the store) and at least one
+admin/assignment *before* it goes live, or every operator is 403'd. The admin UI
+(or `Provision-RbacPhase0.ps1`) populates this.
 
 ## Key constraints & assumptions
 
@@ -88,7 +126,7 @@ Target: a single long-running **Container App** (not a Job). See `deploy/`
   is GET-only (single exception: POST to the Graph `search/query` endpoint).
 - **No raw PowerShell from the client.** Commands are built server-side only.
 - **Localhost by default.** `HOST`/`DOCKER_MODE` widen the bind; network
-  exposure is gated by Easy Auth until RBAC ships.
+  exposure is gated by Easy Auth at the edge and v12 RBAC inside the app.
 - **Graph/EXO HTTP failures are terminating** — report code wraps calls in
   try/catch and returns an `ERROR` row, never a dead job.
 - Windows dev workstation; OneDrive-redirected Documents require
@@ -96,12 +134,14 @@ Target: a single long-running **Container App** (not a Job). See `deploy/`
 
 ## Open architectural questions
 
-- **v12 RBAC** — OIDC sign-in + config-based authz + HTTPS as one unit. Once it
-  lands, app-level authorization can layer *inside* the Easy Auth gate (or
-  replace it). See `RBAC-ROADMAP.md`.
-- **Per-tenant app-only (certificate) Graph auth** — the robust successor to the
-  device-code model for unattended/multi-tenant cloud operation. Removes the
-  cold-start re-auth and the single-replica constraint.
+- **v12 RBAC — SHIPPED** (v12.0.0). See the section above and ADR-0006/0007.
+- **Per-tenant app-only (certificate) Graph auth — SHIPPED (Phase 4a).** Still
+  open: **Phase 4b** — the concurrent per-tenant connection pool that retires the
+  single in-memory session and lifts `maxReplicas 1`; deferred until live
+  multi-tenant traffic can validate it.
+- **Group-claim overage fallback** — `auth.js` flags overage but the Graph
+  `memberOf` lookup is not built yet; needed before relying on group-based rules
+  for users in many groups.
 - **Historical Search** (`Start-HistoricalSearch`) — async; needs a submit/poll
   state machine that doesn't fit the current synchronous job queue.
 

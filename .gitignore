@@ -31,3 +31,6 @@ Handoff/
 
 # Claude Code local session state (keep CLAUDE.md and .claude/commands/ tracked)
 .claude/settings.local.json
+
+# Nimbalyst editor session scratch (browser screenshots, transcript images)
+.nimbalyst/
