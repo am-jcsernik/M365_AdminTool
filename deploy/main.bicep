@@ -64,8 +64,16 @@ param cpu string = '1.0'
 @description('Memory for the container (must pair with cpu; e.g. 2Gi with 1.0 CPU).')
 param memory string = '2Gi'
 
+@description('v12 RBAC: create a Key Vault (RBAC-auth mode) and grant the app identity read access. Additive — leave false for pre-v12 deploys. The Phase 0 script (Provision-RbacPhase0.ps1) is the imperative path for the already-live app.')
+param deployKeyVault bool = false
+
+@description('v12 RBAC: Key Vault name for per-tenant app-only certificates. Required when deployKeyVault is true.')
+param keyVaultName string = ''
+
 var storageLinkName = 'm365data'
 var dataMountPath = '/app/data'
+// Built-in role: Key Vault Secrets User (read secret contents).
+var kvSecretsUserRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '4633458b-17de-408a-b874-0445c86b69e6')
 
 // ── Log Analytics workspace ──────────────────────────────────────────
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
@@ -110,6 +118,11 @@ resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName
   location: location
+  // v12 RBAC: system-assigned identity lets the app read per-tenant certs from
+  // Key Vault at runtime (no secret on disk). Harmless when deployKeyVault=false.
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
     managedEnvironmentId: environment.id
     configuration: {
@@ -149,6 +162,9 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             { name: 'PORT', value: '3365' }
             { name: 'DATA_DIR', value: dataMountPath }
             { name: 'NODE_ENV', value: 'production' }
+            // v12 RBAC: name of the Key Vault holding per-tenant app-only certs.
+            // Empty until deployKeyVault is enabled; the app reads it only then.
+            { name: 'KEY_VAULT_NAME', value: keyVaultName }
           ]
           volumeMounts: [
             { volumeName: 'data', mountPath: dataMountPath }
@@ -188,7 +204,35 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   ]
 }
 
+// ── v12 RBAC: Key Vault for per-tenant app-only certificates ──────────
+// RBAC-authorization mode; the app's system-assigned identity is granted
+// "Key Vault Secrets User" so it can read cert material at connect time.
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = if (deployKeyVault) {
+  name: keyVaultName
+  location: location
+  properties: {
+    sku: { family: 'A', name: 'standard' }
+    tenantId: subscription().tenantId
+    enableRbacAuthorization: true
+    enableSoftDelete: true
+  }
+}
+
+resource kvSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployKeyVault) {
+  name: guid(keyVault.id, containerApp.id, 'kv-secrets-user')
+  scope: keyVault
+  properties: {
+    roleDefinitionId: kvSecretsUserRoleId
+    principalId: containerApp.identity.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
 @description('The public HTTPS FQDN of the deployed app.')
 output appFqdn string = containerApp.properties.configuration.ingress.fqdn
 @description('Convenience full URL.')
 output appUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
+@description('The app system-assigned identity principalId (for KV / Graph grants).')
+output appPrincipalId string = containerApp.identity.principalId
+@description('Key Vault URI (empty unless deployKeyVault is true).')
+output keyVaultUri string = deployKeyVault ? keyVault!.properties.vaultUri : ''

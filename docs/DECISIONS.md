@@ -5,6 +5,48 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-14 -- ADR-0006: v12 multi-user RBAC — Easy Auth identity + in-tool roles + app-only cert per tenant
+**Context:** The tool must move from "single admin on localhost" to a small
+multi-user service with three access tiers: who may open the tool, which tenants
+each user may reach, and which areas/reports each may run (session 3 requirement).
+Easy Auth already gates *who reaches* the tool (ADR-0003) but provides no
+per-user authorization; the single in-memory device-code `pwsh` session (capped
+at `maxReplicas 1`, ADR-0003/0005) cannot serve concurrent users across multiple
+tenants; and the report catalog is server-owned, so a per-role allowlist is a
+simple filter. The original `RBAC-ROADMAP.md` predated the Easy Auth deploy and
+assumed an in-app OIDC flow.
+**Decision:**
+- **AuthN:** reuse **Easy Auth** — resolve the acting user from the
+  `X-MS-CLIENT-PRINCIPAL-*` headers; do **not** build a second in-app OIDC flow.
+- **Overall-access gate:** membership in a designated **Entra security group**.
+- **Inner authZ:** an in-tool RBAC engine with **named, reusable roles**
+  (`{tenants, areas/reports}`) assigned to users or Entra groups; **default-deny**.
+- **First-admin bootstrap:** a designated **Entra admin group** auto-grants the
+  in-tool admin role.
+- **Tenants:** admin-defined in the UI (friendly name → tenantId + app
+  registration + Key Vault cert reference); users pick from a friendly-name
+  dropdown; visibility is part of the role assignment.
+- **Connection:** **app-only certificate auth per tenant** (pooled per-tenant
+  connections), retiring the shared device-code session (kept only as a local-dev
+  fallback). Certs live in **Azure Key Vault**, read by ACA via **managed
+  identity** — never on disk or in the UI store.
+- **AuthZ store:** a writable JSON store on the `DATA_DIR` Azure Files mount
+  (non-secret metadata only); `config.json` `tenants[]` becomes a seed source.
+- **Report scope:** granular at **area (category) and report-ID** level.
+- Ships as one coherent major version, **v12.0.0**.
+**Consequences:** Two identities are now recorded on every action — the acting
+user (Easy Auth) and the connection identity (per-tenant app SP); `audit.js`'s
+identity provider moves off `connectionInfo.account` to the acting user. App-only
+auth does not impersonate a user — it acts as the app and targets a named
+user/mailbox, bounded by granted application permissions (optionally narrowed via
+Graph RBAC-for-Apps / Exchange Application Access Policy). Retiring the shared
+session lifts the `maxReplicas 1` cap and removes cold-start re-auth. New infra
+required: Key Vault, an ACA managed identity, and per-tenant app registrations
+with admin-consented application permissions. Enforcement adds middleware + guards
+on the existing routes (`/api/connect/*`, `/api/run`, `/api/pack/run`,
+snapshots/diff/export, `/api/reports`, `/api/config`, `/api/audit`). Full design
+and phasing in `RBAC-ROADMAP.md`; build steps in `docs/PLAN-v12-rbac.md`.
+
 ## 2026-07-14 -- ADR-0005: First live ACA deploy landed in eastus2, deploy script hardened
 **Context:** Executing the first real `deploy/Deploy-ToAca.ps1` run surfaced four
 issues in sequence. (1) `az acr build` crashed the *local* CLI with a
