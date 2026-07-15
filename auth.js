@@ -82,7 +82,11 @@ function userMiddleware(req, res, next) {
     // Phase 1 does not enforce, so mark it anonymous; Phase 3 will 401 here.
     user = { upn: null, oid: null, groups: [], groupsOverage: false, idp: null, source: "anonymous" };
   }
-  user.isAdmin = !!(ADMIN_GROUP_ID && user.groups.includes(ADMIN_GROUP_ID));
+  // Local dev is a full admin so enforcement never locks out localhost work;
+  // otherwise admin is membership in the bootstrap admin group.
+  user.isAdmin = user.source === "local-dev"
+    ? true
+    : !!(ADMIN_GROUP_ID && user.groups.includes(ADMIN_GROUP_ID));
   req.user = user;
   next();
 }

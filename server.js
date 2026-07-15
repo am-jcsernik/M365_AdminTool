@@ -36,6 +36,7 @@ const { saveSnapshot, listSnapshots, loadSnapshot, deleteSnapshot, diffRows } = 
 const { audit, readAudit, setConnectionIdentityProvider } = require("./audit.js");
 const { PACKS, findPack } = require("./packs.js");
 const { userMiddleware } = require("./auth.js");
+const rbac = require("./rbac.js");
 
 const app = express();
 const PORT = process.env.PORT || 3365;
@@ -69,6 +70,10 @@ app.use(userMiddleware);
 // TEMP_DIR (below) is deliberately NOT under DATA_DIR — it is ephemeral IPC
 // scratch and belongs on fast local/ephemeral storage.
 const DATA_DIR = process.env.DATA_DIR || process.cwd();
+
+// v12 RBAC: initialize the authorization store (seeds from config.json tenants
+// on first run). Guards below read it via rbac.getStore().
+try { rbac.initStore(CONFIG.tenants); } catch (e) { console.error("  RBAC store init failed:", e.message); }
 
 // ── Temp directory ──────────────────────────────────────────────────
 const TEMP_DIR = path.join(os.tmpdir(), "m365-admin-reports");
@@ -431,6 +436,54 @@ function isSafe(cmd) {
 //  API
 // ══════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════
+//  v12 RBAC — access + authorization guards (Phase 3)
+//
+//  Layers: (1) an access gate on all /api/* (except health) requires an
+//  authenticated caller who may use the tool; (2) per-route tenant/report
+//  guards; (3) admin-only routes. Every DENY is audited (allows are covered by
+//  each action's own audit call). Localhost dev is a full admin (see auth.js),
+//  so local behavior is unchanged.
+// ══════════════════════════════════════════════════════════════════════
+function denyAudit(req, res, code, reason, extra = {}) {
+  audit(req, "authz.deny", { reason, path: req.originalUrl, ...extra });
+  return res.status(code).json({ error: reason });
+}
+
+// Map the currently connected Entra tenant to a store tenant slug (or null).
+function connectedTenantSlug() {
+  const tid = connectionInfo.tenantId;
+  if (!tid) return null;
+  const t = (rbac.getStore().tenants || []).find(x => x.tenantId === tid || x.id === tid);
+  return t ? t.id : null;
+}
+
+// Overall access gate — mounted on /api, skips the unauthenticated health probe.
+app.use("/api", (req, res, next) => {
+  if (req.path === "/health") return next();
+  let store;
+  try { store = rbac.getStore(); } catch (e) { return res.status(500).json({ error: "Authorization store unavailable" }); }
+  const u = req.user;
+  if (!u || !u.upn) return denyAudit(req, res, 401, "Not authenticated");
+  if (!rbac.hasToolAccess(u, store)) return denyAudit(req, res, 403, "Not authorized to use this tool");
+  next();
+});
+
+// Report guard (report-only): reportId from body or route params.
+function guardReport(req, res, next) {
+  const reportId = (req.body && req.body.reportId) || req.params.reportId || null;
+  if (!reportId) return next(); // missing-id shape errors are handled by the route
+  if (!rbac.can(req.user, { reportId }, rbac.getStore()))
+    return denyAudit(req, res, 403, "Not authorized for this report", { reportId });
+  next();
+}
+
+// Admin-only guard.
+function requireAdmin(req, res, next) {
+  if (!rbac.isAdmin(req.user, rbac.getStore())) return denyAudit(req, res, 403, "Admin only");
+  next();
+}
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", version: VERSION, ...connectionInfo, sessionAlive: psAlive, dockerMode: DOCKER_MODE, ps: { exe: detectedPS.exe, version: detectedPS.version, graphModule: detectedPS.graphModule, graphUsersModule: detectedPS.graphUsersModule, exoModule: detectedPS.exoModule, ready: detectedPS.ready, probing: detectedPS.probing, error: detectedPS.probeError }, platform: os.platform() });
 });
@@ -455,6 +508,16 @@ app.post("/api/install-graph", (req, res) => {
 // ── Connect Graph (interactive browser OR device code) ──────────────
 app.post("/api/connect/graph", (req, res) => {
   const { account, tenantId, useDeviceCode } = req.body || {};
+  // Tenant guard: a non-admin may only connect to a tenant they are granted.
+  if (!rbac.isAdmin(req.user, rbac.getStore())) {
+    const allowed = rbac.allowedTenants(req.user, rbac.getStore());
+    if (tenantId && tenantId.trim()) {
+      if (!allowed.find(t => t.tenantId === tenantId || t.id === tenantId))
+        return denyAudit(req, res, 403, "Not authorized for this tenant", { tenantId });
+    } else if (allowed.length === 0) {
+      return denyAudit(req, res, 403, "No tenant access");
+    }
+  }
   const useDevCode = useDeviceCode || DOCKER_MODE;
   deviceCode = null; // clear any stale prompt from a prior attempt
   log(`CONNECT GRAPH: account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${useDevCode}`);
@@ -559,7 +622,15 @@ app.get("/api/browse/licenses", (req, res) => {
 app.post("/api/browse/refresh", (req, res) => { entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } }; res.json({ ok: true }); });
 
 // ── Report catalog (server-owned; client renders from this) ─────────
-app.get("/api/reports", (req, res) => { res.json(REPORTS); });
+app.get("/api/reports", (req, res) => {
+  const store = rbac.getStore();
+  if (rbac.isAdmin(req.user, store)) return res.json(REPORTS);
+  // Return only the areas/reports the caller may run; drop empty categories.
+  const filtered = REPORTS
+    .map(c => ({ ...c, items: c.items.filter(it => rbac.can(req.user, { reportId: it.id }, store)) }))
+    .filter(c => c.items.length);
+  res.json(filtered);
+});
 
 // ── Run report by ID ────────────────────────────────────────────────
 // The client sends { reportId, params, fields } — never raw PowerShell.
@@ -571,6 +642,9 @@ app.post("/api/run", (req, res) => {
   if (!reportId) return res.status(400).json({ error: "No reportId" });
   const report = findReport(reportId);
   if (!report) return res.status(404).json({ error: `Unknown report: ${reportId}` });
+  // Authorization: the report must be allowed for the caller in the connected tenant.
+  if (!rbac.can(req.user, { tenant: connectedTenantSlug(), reportId }, rbac.getStore()))
+    return denyAudit(req, res, 403, "Not authorized for this report", { reportId });
   const cmd = buildCommand(report, fields, params);
   const c = isSafe(cmd);
   if (!c.ok) { log(`RUN ${reportId} REJECTED: ${c.why}`); audit(req, "report.rejected", { reportId, why: c.why }); return res.status(403).json({ error: c.why }); }
@@ -606,7 +680,7 @@ app.post("/api/export", (req, res) => {
 // ── Snapshots & diff ────────────────────────────────────────────────
 // Point-in-time copies of report results, stored under ./M365Snapshots.
 // Diff answers "what changed since <snapshot>" — the audit primitive.
-app.post("/api/snapshots", (req, res) => {
+app.post("/api/snapshots", guardReport, (req, res) => {
   const { reportId, rows, label, params, fields } = req.body || {};
   if (!reportId || !findReport(reportId)) return res.status(400).json({ error: "Unknown reportId" });
   if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: "No rows to snapshot" });
@@ -615,25 +689,25 @@ app.post("/api/snapshots", (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/snapshots/:reportId", (req, res) => {
+app.get("/api/snapshots/:reportId", guardReport, (req, res) => {
   if (!findReport(req.params.reportId)) return res.status(400).json({ error: "Unknown reportId" });
   res.json(listSnapshots(req.params.reportId));
 });
 
-app.get("/api/snapshots/:reportId/:id", (req, res) => {
+app.get("/api/snapshots/:reportId/:id", guardReport, (req, res) => {
   const s = loadSnapshot(req.params.reportId, req.params.id);
   if (!s) return res.status(404).json({ error: "Snapshot not found" });
   res.json(s);
 });
 
-app.delete("/api/snapshots/:reportId/:id", (req, res) => {
+app.delete("/api/snapshots/:reportId/:id", guardReport, (req, res) => {
   audit(req, "snapshot.delete", { reportId: req.params.reportId, id: req.params.id });
   res.json({ deleted: deleteSnapshot(req.params.reportId, req.params.id) });
 });
 
 // Diff a snapshot (fromId) against either current rows (toRows) or a second
 // snapshot (toId). Direction: from = older baseline, to = newer state.
-app.post("/api/diff", (req, res) => {
+app.post("/api/diff", guardReport, (req, res) => {
   const { reportId, fromId, toId, toRows } = req.body || {};
   if (!reportId || !findReport(reportId)) return res.status(400).json({ error: "Unknown reportId" });
   const from = loadSnapshot(reportId, fromId);
@@ -715,6 +789,11 @@ app.post("/api/pack/run", (req, res) => {
   const pack = findPack(packId);
   if (!pack) return res.status(404).json({ error: `Unknown pack: ${packId}` });
   if (!connectionInfo.graphConnected) return res.status(409).json({ error: "Connect to Graph before running a pack" });
+  // Authorization: every report in the pack must be allowed for the caller.
+  const tenantSlug = connectedTenantSlug();
+  const store = rbac.getStore();
+  const denied = pack.reports.filter(rid => !rbac.can(req.user, { tenant: tenantSlug, reportId: rid }, store));
+  if (denied.length) return denyAudit(req, res, 403, "Not authorized for one or more reports in this pack", { packId, denied });
   const cleanLabel = label ? String(label).slice(0, 120) : "";
   audit(req, "pack.run", { packId, snapshot: !!snapshot, label: cleanLabel || null });
   const packJob = {
@@ -794,8 +873,13 @@ app.get("/api/dashboard", async (req, res) => {
 });
 
 // ── Config & audit ──────────────────────────────────────────────────
-app.get("/api/config", (req, res) => { res.json({ tenants: CONFIG.tenants || [] }); });
-app.get("/api/audit", (req, res) => {
+app.get("/api/config", (req, res) => {
+  // Only the tenants the caller may reach (friendly-name dropdown source).
+  const tenants = rbac.allowedTenants(req.user, rbac.getStore())
+    .map(t => ({ id: t.id, name: t.name, tenantId: t.tenantId }));
+  res.json({ tenants });
+});
+app.get("/api/audit", requireAdmin, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
   res.json({ entries: readAudit(limit) });
 });

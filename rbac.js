@@ -94,6 +94,29 @@ function saveStore(store) {
   fs.renameSync(tmp, STORE_PATH);
 }
 
+// ── Cached accessor ───────────────────────────────────────────────────
+// server.js reads the store on every request via getStore(); we reload only
+// when the file's mtime changes so admin-UI edits (Phase 5) take effect live
+// without a restart, and unchanged requests avoid re-parsing.
+let _cache = null, _mtimeMs = 0, _seedTenants = [];
+
+function statMtime() {
+  try { return fs.existsSync(STORE_PATH) ? fs.statSync(STORE_PATH).mtimeMs : 0; }
+  catch { return 0; }
+}
+
+// Call once at startup with config.json tenants (used only for first-run seed).
+function initStore(configTenants = []) { _seedTenants = configTenants || []; _cache = null; return getStore(); }
+
+function getStore() {
+  const m = statMtime();
+  if (!_cache || m !== _mtimeMs) {
+    _cache = loadStore(_seedTenants);
+    _mtimeMs = statMtime();
+  }
+  return _cache;
+}
+
 // ── Engine ────────────────────────────────────────────────────────────
 
 const lc = (v) => (v == null ? null : String(v).toLowerCase());
@@ -195,5 +218,6 @@ function allowedTenants(user, store) {
 
 module.exports = {
   loadStore, saveStore, seedStore, normalizeStore, STORE_PATH,
+  initStore, getStore,
   isAdmin, hasToolAccess, resolveRoles, effectiveAccess, can, allowedTenants,
 };
