@@ -91,16 +91,15 @@ COPY package.json package-lock.json ./
 # (the server transforms the frontend at request time), so it is retained.
 RUN npm ci --omit=dev
 
-# Copy application code. server.js require()s every module below, so all of
-# them must be present in the image (the pre-v11 Dockerfile copied only
-# server.js + public/, which no longer boots after the module split).
-COPY server.js reports.js packs.js snapshots.js audit.js ./
-# v12 RBAC modules — server.js require()s these, so they MUST be in the image.
-COPY auth.js rbac.js tenants.js keyvault.js ./
-# v12 Phase 4b — the per-tenant session pool; server.js require()s it. Omitting
-# it crash-loops the image on boot (MODULE_NOT_FOUND). See ADR-0007's Dockerfile
-# COPY note: this explicit list must track every module server.js requires.
-COPY sessions.js ./
+# Copy ALL top-level application modules. server.js require()s a graph of local
+# modules (reports, packs, snapshots, audit, auth, rbac, tenants, keyvault,
+# sessions, …); every one must be in the image or the app crash-loops on boot
+# with MODULE_NOT_FOUND. This bug bit twice (auth.js/rbac.js in ADR-0007,
+# sessions.js in v12.1.1) because an explicit per-file COPY list silently fell
+# out of sync with new require()s. A glob copies every top-level *.js so adding a
+# new module can never again omit it from the image. The pre-package lint
+# (`npm run lint:copy`) also fails the build if any require("./x") lacks its file.
+COPY *.js ./
 COPY scripts/ ./scripts/
 COPY public/ ./public/
 COPY config.json.example ./

@@ -4,6 +4,35 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.3] — 2026-07-15
+
+### Changed
+- **Connect card is app-only in the hosted tool.** In `DOCKER_MODE` the card now
+  hides the delegated-only controls that could only ever fail server-side — the
+  Account (UPN) box, the "Tenant ID (local delegated only)" box, the "Use device
+  code auth" checkbox, and the "Connect as Current User" button — leaving just the
+  tenant selector and Connect. The Connect button is disabled until a tenant is
+  chosen, and the "connecting" banner no longer claims a browser sign-in window
+  will open (app-only certificate auth needs none). Delegated controls still show
+  on localhost, where the delegated fallback is valid.
+
+### Added
+- **Clear messaging for the unauthorized/no-tenant cases.** A caller who is
+  authenticated but not authorized (RBAC access gate denies `/api/config`) now
+  sees a plain "No access — ask an administrator…" banner instead of a working-
+  looking Connect button that dead-ends in "No job was created." A caller with
+  tool access but no tenant granted sees a targeted "no tenant available" note.
+- **`npm run lint:copy` build guard** (`scripts/lint-copy.js`) — walks the
+  `server.js` local `require()` graph and fails if any `require("./x")` is
+  unresolved or not copied by the Dockerfile.
+
+### Fixed
+- **Dockerfile hardening against the recurring crash-loop.** The image now copies
+  every top-level module with `COPY *.js ./` instead of an explicit per-file list
+  that twice fell out of sync with new `require()`s (ADR-0007 `auth.js`/`rbac.js`;
+  v12.1.1 `sessions.js`). A new module can no longer be silently omitted from the
+  image.
+
 ## [12.1.2] — 2026-07-15
 
 ### Fixed
