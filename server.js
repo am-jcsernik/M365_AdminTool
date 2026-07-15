@@ -37,10 +37,14 @@ const { audit, readAudit, setConnectionIdentityProvider } = require("./audit.js"
 const { PACKS, findPack } = require("./packs.js");
 const { userMiddleware } = require("./auth.js");
 const rbac = require("./rbac.js");
+const tenants = require("./tenants.js");
 
 const app = express();
 const PORT = process.env.PORT || 3365;
 const DOCKER_MODE = !!process.env.DOCKER_MODE;
+// v12 RBAC Phase 4: when set, per-tenant app-only certificate auth is used for
+// tenants that carry cert config (clientId + certSecret). Unset => device-code.
+const KEY_VAULT_NAME = process.env.KEY_VAULT_NAME || null;
 // SECURITY: localhost-only by default. The UI drives a PowerShell session
 // that may hold an authenticated Graph token — never expose it to the LAN
 // unless explicitly requested (Docker needs 0.0.0.0 inside the container).
@@ -518,6 +522,46 @@ app.post("/api/connect/graph", (req, res) => {
       return denyAudit(req, res, 403, "No tenant access");
     }
   }
+  // ── App-only (certificate) path ──────────────────────────────────
+  // Preferred when Key Vault is wired and the selected tenant carries cert
+  // config, UNLESS the caller explicitly asked for device code (admin bootstrap).
+  // Falls back to the interactive/device path below otherwise. (Phase 4a: single
+  // session; the concurrent per-tenant pool is Phase 4b.)
+  if (KEY_VAULT_NAME && !useDeviceCode) {
+    const store = rbac.getStore();
+    const appTenant = tenants.tenantBySlug(store, req.body && req.body.tenant)
+      || (tenantId ? (store.tenants || []).find(t => t.tenantId === tenantId || t.id === tenantId) : null);
+    if (tenants.isAppOnlyConfigured(appTenant)) {
+      const jobId = uuidv4();
+      // Pre-register the job so a fast poll doesn't 404 while the cert stages.
+      jobs.set(jobId, { status: "running", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null });
+      deviceCode = null;
+      log(`CONNECT GRAPH (app-only): tenant=${appTenant.id}`);
+      audit(req, "connect.graph", { tenant: appTenant.id, mode: "app-only" });
+      (async () => {
+        try {
+          const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
+          const cmd = tenants.buildGraphAppOnlyConnect(appTenant, cert.path);
+          runInSession(cmd, jobId, { timeout: 120000 });
+          const iv = setInterval(() => {
+            const j = jobs.get(jobId);
+            if (j && j.status !== "running" && j.status !== "queued") {
+              clearInterval(iv);
+              if (j.output && j.output.trim()) {
+                const raw = j.output.trim(); const s = raw.indexOf("{"), e = raw.lastIndexOf("}");
+                if (s !== -1 && e !== -1) { try { const d = JSON.parse(raw.substring(s, e + 1)); connectionInfo.graphConnected = true; connectionInfo.account = d.Account || appTenant.clientId; connectionInfo.tenantId = d.TenantId || appTenant.tenantId; log(`CONNECTED (app-only) as ${connectionInfo.account}`); } catch {} }
+              }
+            }
+          }, 500);
+        } catch (e) {
+          log(`APP-ONLY connect failed: ${e.message}`);
+          jobs.set(jobId, { status: "error", output: "", error: `App-only connect failed: ${e.message}`, info: "", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+        }
+      })();
+      return res.json({ jobId });
+    }
+  }
+
   const useDevCode = useDeviceCode || DOCKER_MODE;
   deviceCode = null; // clear any stale prompt from a prior attempt
   log(`CONNECT GRAPH: account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${useDevCode}`);
@@ -558,6 +602,30 @@ app.post("/api/connect/graph", (req, res) => {
 // ── Connect Exchange ────────────────────────────────────────────────
 app.post("/api/connect/exchange", (req, res) => {
   const { account } = req.body || {};
+  // App-only (certificate) path — used when the connected/selected tenant has
+  // cert config and Key Vault is wired. Falls back to interactive/device below.
+  if (KEY_VAULT_NAME) {
+    const store = rbac.getStore();
+    const appTenant = tenants.tenantBySlug(store, req.body && req.body.tenant)
+      || (connectionInfo.tenantId ? (store.tenants || []).find(t => t.tenantId === connectionInfo.tenantId || t.id === connectionInfo.tenantId) : null);
+    if (tenants.isAppOnlyConfigured(appTenant)) {
+      const jobId = uuidv4();
+      jobs.set(jobId, { status: "running", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null });
+      audit(req, "connect.exchange", { tenant: appTenant.id, mode: "app-only" });
+      (async () => {
+        try {
+          const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
+          const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, req.body && req.body.org);
+          runInSession(cmd, jobId, { timeout: 120000 });
+          const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output && j.output.trim()) connectionInfo.exchangeConnected = true; } }, 500);
+        } catch (e) {
+          log(`APP-ONLY exchange connect failed: ${e.message}`);
+          jobs.set(jobId, { status: "error", output: "", error: `App-only Exchange connect failed: ${e.message}`, info: "", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+        }
+      })();
+      return res.json({ jobId });
+    }
+  }
   const useDevCode = DOCKER_MODE;
   const upn = account ? account.replace(/[`$"'{}();&|]/g, "") : "";
   deviceCode = null; // clear any stale prompt from a prior attempt
