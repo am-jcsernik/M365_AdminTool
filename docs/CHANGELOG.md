@@ -3,6 +3,15 @@
 All notable changes to deliverables in this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [12.1.2] — 2026-07-15
+### Fixed
+- **App-only connect result capture (`raw: true`).** The app-only Graph/Exchange
+  connect commands write to `__OUTFILE__` (substituted only in raw mode) but were
+  run without `raw: true`, so `Connect-MgGraph -Certificate` succeeded yet
+  produced no captured output — the server never set `graphConnected`, leaving
+  every Run button disabled. Pre-existing since Phase 4a; first live app-only
+  connect surfaced it. Both app-only calls now pass `raw: true`.
+
 ## [12.1.1] — 2026-07-15
 ### Fixed
 - **Dockerfile `COPY` now ships `sessions.js`** — the 12.1.0 image omitted the new

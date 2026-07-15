@@ -380,7 +380,10 @@ app.post("/api/connect/graph", (req, res) => {
         const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
         s.certPath = cert.path;
         const cmd = tenants.buildGraphAppOnlyConnect(appTenant, cert.path);
-        sessions.runInSession(s, cmd, jobId, { timeout: 120000 });
+        // raw: the connect command writes its own result to __OUTFILE__ (token
+        // substituted only in raw mode). Without raw the token isn't replaced,
+        // the result isn't captured, and the connect is never detected.
+        sessions.runInSession(s, cmd, jobId, { timeout: 120000, raw: true });
         const iv = setInterval(() => {
           const j = jobs.get(jobId);
           if (j && j.status !== "running" && j.status !== "queued") {
@@ -470,7 +473,8 @@ app.post("/api/connect/exchange", (req, res) => {
         const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
         s.certPath = cert.path;
         const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, req.body && req.body.org);
-        sessions.runInSession(s, cmd, jobId, { timeout: 120000 });
+        // raw: see the Graph app-only note — the command writes to __OUTFILE__.
+        sessions.runInSession(s, cmd, jobId, { timeout: 120000, raw: true });
         const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output && j.output.trim()) s.connectionInfo.exchangeConnected = true; } }, 500);
       } catch (e) {
         log(`APP-ONLY exchange connect failed: ${e.message}`);

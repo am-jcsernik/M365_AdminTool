@@ -4,6 +4,19 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.2] — 2026-07-15
+
+### Fixed
+- **App-only connect now captures its result (`raw: true`).** The per-tenant
+  app-only Graph/Exchange connect commands write their result via the
+  `__OUTFILE__` token, which is only substituted in raw execution mode — but the
+  app-only path called `runInSession` without `raw: true`. `Connect-MgGraph
+  -Certificate` succeeded but produced 0 bytes of captured output, so the server
+  never set `graphConnected` and every report's Run button stayed disabled
+  (Graph shown as not-connected). Pre-existing since Phase 4a; first surfaced on
+  the initial live app-only connect. Both Graph and Exchange app-only calls now
+  pass `raw: true` (matching the delegated path).
+
 ## [12.1.1] — 2026-07-15
 
 ### Fixed
