@@ -25,6 +25,9 @@ M365Logs/
 M365Reports/
 # Local docker-compose DATA_DIR volume (container runtime state)
 /data/
+# RBAC authorization store — runtime state under DATA_DIR (defaults to cwd in
+# local dev); the live store lives on the Azure Files mount, never in git.
+/access/
 
 # Session transfer / build-artifact staging (tarballs + handoff notes)
 Handoff/

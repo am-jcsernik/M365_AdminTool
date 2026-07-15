@@ -1,12 +1,13 @@
 {
   "name": "m365-admin-reports",
-  "version": "12.1.2",
+  "version": "12.1.3",
   "description": "M365 Admin Read-Only Reports — Web UI with live PowerShell execution",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js --dev",
     "lint": "node scripts/lint-reports.js",
+    "lint:copy": "node scripts/lint-copy.js",
     "test": "node --test"
   },
   "dependencies": {

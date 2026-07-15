@@ -3,6 +3,22 @@
 All notable changes to deliverables in this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [12.1.3] — 2026-07-15
+### Changed
+- **Hosted connect card is app-only.** In `DOCKER_MODE` the delegated-only
+  controls (UPN box, "Tenant ID (local delegated only)", device-code checkbox,
+  "Connect as Current User") are hidden — only the tenant selector + Connect
+  remain, Connect is disabled until a tenant is picked, and the connecting banner
+  drops the browser-sign-in wording. Delegated controls still show on localhost.
+### Added
+- **No-access / no-tenant messaging** — an authenticated-but-unauthorized caller
+  sees a clear "No access, ask an admin" banner instead of a dead Connect button;
+  a caller with access but no granted tenant sees a targeted note.
+- **`npm run lint:copy`** — guards the require()→Dockerfile-COPY invariant.
+### Fixed
+- **Dockerfile now copies every module (`COPY *.js ./`)** — retires the fragile
+  explicit list that crash-looped the image twice (ADR-0007; v12.1.1).
+
 ## [12.1.2] — 2026-07-15
 ### Fixed
 - **App-only connect result capture (`raw: true`).** The app-only Graph/Exchange
