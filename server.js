@@ -33,8 +33,9 @@ const fs = require("fs");
 const os = require("os");
 const { REPORTS, findReport, buildCommand } = require("./reports.js");
 const { saveSnapshot, listSnapshots, loadSnapshot, deleteSnapshot, diffRows } = require("./snapshots.js");
-const { audit, readAudit, setIdentityProvider } = require("./audit.js");
+const { audit, readAudit, setConnectionIdentityProvider } = require("./audit.js");
 const { PACKS, findPack } = require("./packs.js");
+const { userMiddleware } = require("./auth.js");
 
 const app = express();
 const PORT = process.env.PORT || 3365;
@@ -56,6 +57,9 @@ try {
   }
 } catch (e) { console.error("  config.json invalid:", e.message); }
 app.use(express.json({ limit: "2mb" }));
+// v12 RBAC Phase 1: resolve the acting user (Easy Auth) onto req.user for every
+// request. AuthN only — no access enforcement here (that is Phase 3).
+app.use(userMiddleware);
 
 // ── Persistent data directory ────────────────────────────────────────
 // All durable state (snapshots, audit log, console logs, CSV exports) lives
@@ -204,7 +208,7 @@ let connectionInfo = { graphConnected: false, exchangeConnected: false, account:
 // Most recent device-code prompt ({ url, code, at }), surfaced to the client
 // during a device-code connect. Null when none is pending.
 let deviceCode = null;
-setIdentityProvider(() => connectionInfo.account || null);
+setConnectionIdentityProvider(() => connectionInfo.account || null);
 let entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
 
 // ── Job queue ─────────────────────────────────────────────────────────

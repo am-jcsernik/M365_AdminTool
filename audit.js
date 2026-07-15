@@ -7,11 +7,13 @@
  * filename). Entries are never modified or deleted by the application.
  *
  * Entry shape:
- *   { ts, action, ip, detail }
+ *   { ts, action, account, connection, ip, detail }
  *
- * This is the foundation for the planned RBAC feature (see
- * RBAC-ROADMAP.md) — once users authenticate, entries also carry the
- * acting identity.
+ * v12 records TWO identities (see RBAC-ROADMAP.md / docs/PLAN-v12-rbac.md):
+ *   - account    — the ACTING USER (Easy Auth), taken from req.user.upn. This
+ *                  is the accountability identity for "who did this".
+ *   - connection — WHAT the tool reported as (the connected Graph/EXO account),
+ *                  supplied by the connection identity provider below.
  */
 
 const fs = require("fs");
@@ -21,10 +23,13 @@ const path = require("path");
 // defaults to the working directory so local runs are unchanged.
 const AUDIT_DIR = path.join(process.env.DATA_DIR || process.cwd(), "M365AuditLog");
 
-// The server registers a function returning the current acting identity
-// (today: the connected Graph account; post-RBAC: the signed-in user).
-let identityProvider = () => null;
-function setIdentityProvider(fn) { identityProvider = fn; }
+// The server registers a function returning the current CONNECTION identity
+// (the connected Graph/EXO account). The acting user comes per-request from
+// req.user (see auth.js), not from this global.
+let connectionIdentityProvider = () => null;
+function setConnectionIdentityProvider(fn) { connectionIdentityProvider = fn; }
+// Back-compat alias for the pre-v12 name.
+const setIdentityProvider = setConnectionIdentityProvider;
 
 function currentFile() {
   const d = new Date();
@@ -39,7 +44,11 @@ function audit(req, action, detail = {}) {
     const entry = {
       ts: new Date().toISOString(),
       action,
-      account: (() => { try { return identityProvider(); } catch { return null; } })(),
+      // Acting user (accountability): from req.user (auth.js). Null for
+      // server-initiated events (req === null) or pre-auth requests.
+      account: req && req.user ? (req.user.upn || null) : null,
+      // Connection identity (what the tool reported as).
+      connection: (() => { try { return connectionIdentityProvider(); } catch { return null; } })(),
       ip: req ? (req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null) : null,
       detail,
     };
@@ -66,4 +75,4 @@ function readAudit(limit = 200) {
   return out;
 }
 
-module.exports = { audit, readAudit, setIdentityProvider, AUDIT_DIR };
+module.exports = { audit, readAudit, setConnectionIdentityProvider, setIdentityProvider, AUDIT_DIR };
