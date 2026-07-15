@@ -3,6 +3,26 @@
 All notable changes to deliverables in this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [12.1.0] — 2026-07-15
+### Changed
+- **v12 Phase 4b — per-tenant app-only session pool** (`feature/v12-phase4b`).
+  Fixes a production shared-session credential bleed: a second user saw the tool
+  connected as the admin and ran reports against the admin's delegated token.
+  - **`sessions.js` (new):** per-tenant PowerShell session pool (own process,
+    connection, FIFO queue, browse/dashboard caches, staged cert) replacing the
+    single process-global session; lazy start + 30-min idle eviction.
+  - **App-only enforced in `DOCKER_MODE`:** delegated/device-code connect refused
+    (400); connection identity is always the app SP. Delegated is localhost-only.
+  - **Tenant routed per request** through run/browse/pack/dashboard/connect;
+    `rbac.can(user,{tenant})` re-checked server-side. New `GET /api/connection`;
+    `/api/health` slimmed to liveness + PowerShell state.
+  - **UI** sends the selected tenant slug on every data request.
+### Added
+- **Tamper-evident audit hash chain** (`audit.js`): `verifyAuditChain()` +
+  `integrity` on `GET /api/audit`. `deploy/Grant-ExoAppOnlyRole.ps1` for the
+  manual Exchange app-only RBAC step. Tests: `test/phase4b.sessions.test.js`
+  (22/22 total).
+
 ## [12.0.0] — 2026-07-15
 ### Added
 - **v12 multi-user RBAC** (one major version on `feature/v12-rbac`). Three access
