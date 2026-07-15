@@ -4,6 +4,16 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.1] — 2026-07-15
+
+### Fixed
+- **Dockerfile `COPY` now includes `sessions.js`.** The v12.1.0 image omitted the
+  new Phase 4b module, so the container crash-looped on boot
+  (`Cannot find module './sessions.js'`) → 0 healthy replicas → ingress 404. The
+  12.1.0 image never served a request; 12.1.1 is the first working Phase 4b image.
+  (Recurrence of the ADR-0007 Dockerfile-COPY hazard — the explicit module list
+  must track every `require` in `server.js`.)
+
 ## [12.1.0] — 2026-07-15
 
 **Phase 4b — per-tenant app-only session pool.** Closes the shared-session
