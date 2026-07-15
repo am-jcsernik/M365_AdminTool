@@ -3,6 +3,42 @@
 All notable changes to deliverables in this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
+## [12.1.2] — 2026-07-15
+### Fixed
+- **App-only connect result capture (`raw: true`).** The app-only Graph/Exchange
+  connect commands write to `__OUTFILE__` (substituted only in raw mode) but were
+  run without `raw: true`, so `Connect-MgGraph -Certificate` succeeded yet
+  produced no captured output — the server never set `graphConnected`, leaving
+  every Run button disabled. Pre-existing since Phase 4a; first live app-only
+  connect surfaced it. Both app-only calls now pass `raw: true`.
+
+## [12.1.1] — 2026-07-15
+### Fixed
+- **Dockerfile `COPY` now ships `sessions.js`** — the 12.1.0 image omitted the new
+  Phase 4b module and crash-looped on boot (MODULE_NOT_FOUND → ingress 404).
+  12.1.1 is the first working Phase 4b image. (ADR-0007 Dockerfile-COPY hazard,
+  recurred.)
+
+## [12.1.0] — 2026-07-15
+### Changed
+- **v12 Phase 4b — per-tenant app-only session pool** (`feature/v12-phase4b`).
+  Fixes a production shared-session credential bleed: a second user saw the tool
+  connected as the admin and ran reports against the admin's delegated token.
+  - **`sessions.js` (new):** per-tenant PowerShell session pool (own process,
+    connection, FIFO queue, browse/dashboard caches, staged cert) replacing the
+    single process-global session; lazy start + 30-min idle eviction.
+  - **App-only enforced in `DOCKER_MODE`:** delegated/device-code connect refused
+    (400); connection identity is always the app SP. Delegated is localhost-only.
+  - **Tenant routed per request** through run/browse/pack/dashboard/connect;
+    `rbac.can(user,{tenant})` re-checked server-side. New `GET /api/connection`;
+    `/api/health` slimmed to liveness + PowerShell state.
+  - **UI** sends the selected tenant slug on every data request.
+### Added
+- **Tamper-evident audit hash chain** (`audit.js`): `verifyAuditChain()` +
+  `integrity` on `GET /api/audit`. `deploy/Grant-ExoAppOnlyRole.ps1` for the
+  manual Exchange app-only RBAC step. Tests: `test/phase4b.sessions.test.js`
+  (22/22 total).
+
 ## [12.0.0] — 2026-07-15
 ### Added
 - **v12 multi-user RBAC** (one major version on `feature/v12-rbac`). Three access

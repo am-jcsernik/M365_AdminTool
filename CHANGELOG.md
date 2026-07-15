@@ -4,6 +4,71 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.2] — 2026-07-15
+
+### Fixed
+- **App-only connect now captures its result (`raw: true`).** The per-tenant
+  app-only Graph/Exchange connect commands write their result via the
+  `__OUTFILE__` token, which is only substituted in raw execution mode — but the
+  app-only path called `runInSession` without `raw: true`. `Connect-MgGraph
+  -Certificate` succeeded but produced 0 bytes of captured output, so the server
+  never set `graphConnected` and every report's Run button stayed disabled
+  (Graph shown as not-connected). Pre-existing since Phase 4a; first surfaced on
+  the initial live app-only connect. Both Graph and Exchange app-only calls now
+  pass `raw: true` (matching the delegated path).
+
+## [12.1.1] — 2026-07-15
+
+### Fixed
+- **Dockerfile `COPY` now includes `sessions.js`.** The v12.1.0 image omitted the
+  new Phase 4b module, so the container crash-looped on boot
+  (`Cannot find module './sessions.js'`) → 0 healthy replicas → ingress 404. The
+  12.1.0 image never served a request; 12.1.1 is the first working Phase 4b image.
+  (Recurrence of the ADR-0007 Dockerfile-COPY hazard — the explicit module list
+  must track every `require` in `server.js`.)
+
+## [12.1.0] — 2026-07-15
+
+**Phase 4b — per-tenant app-only session pool.** Closes the shared-session
+credential bleed found in production: a second user saw the tool "connected as"
+the admin, and their reports executed against the admin's delegated token,
+because v11 kept one process-global PowerShell session/connection/queue.
+
+### Changed
+- **Per-tenant session pool (`sessions.js`, new).** The single global session is
+  replaced by `Map<tenantSlug → {pwsh, connectionInfo, queue, caches, cert}>`.
+  Each tenant gets its own process, connection state, FIFO queue, and browse/
+  dashboard caches. Concurrency is across tenants; within a tenant, commands
+  still serialize (the no-interleave invariant is preserved). Sessions start
+  lazily and are evicted after 30 min idle (pwsh killed, staged cert unlinked).
+- **App-only enforced in the hosted tool.** In `DOCKER_MODE`, delegated/device-
+  code connect is refused (400) — the connection identity is always the app
+  service principal, never a person, so no user's token is ever server-side.
+  Delegated auth survives only as the localhost-dev fallback.
+- **Tenant routed per request.** `/api/run`, `/api/browse/*`, `/api/pack/run`,
+  `/api/dashboard`, connect, disconnect, and restart resolve the caller's
+  selected tenant and re-check `rbac.can(user, {tenant})` server-side (the
+  client's choice is never trusted). New `GET /api/connection?tenant=` reports
+  per-tenant status; `/api/health` is now liveness + PowerShell state only.
+- **UI (`public/index.html`).** Sends the selected tenant slug on every data
+  request; per-tenant connection banner; tenant selector keyed by slug.
+
+### Added
+- **Tamper-evident audit log.** Each entry is hash-chained
+  (`hash = sha256(prevHash + entry)`); `GET /api/audit` returns an `integrity`
+  verdict from `verifyAuditChain()`. Under app-only the tool's own log is the
+  authoritative "who" record (the M365 unified log attributes to the app SP).
+  Report runs record the tenant + connection identity.
+- Tests: `test/phase4b.sessions.test.js` — delegated refusal in `DOCKER_MODE`,
+  per-tenant routing + tenant authorization, and audit chain integrity/tamper
+  detection. Suite now 22/22.
+
+### Notes
+- `maxReplicas` stays 1 (sessions are in-memory per replica). Scaling >1 would
+  require ACA session affinity — out of scope here.
+- Known UI limitation: switching tenants after connecting requires disconnect
+  (the tenant selector shows in the connect card). Follow-up.
+
 ## [12.0.0] — 2026-07-15
 
 Multi-user, default-deny **RBAC** — the tool moves from "single admin on

@@ -72,15 +72,21 @@ Target: a single long-running **Container App** (not a Job). See `deploy/`
 - **Ingress gate** — Entra **Easy Auth**, restricted to the home tenant. This is
   the *outer* gate (who reaches the app); **v12 RBAC** enforces authorization
   *inside* it (which tenants/reports each caller may use). See below.
-- **Graph/EXO auth** — **app-only certificate** per tenant (v12 Phase 4a), with
-  the cert fetched from Key Vault via the Container App's managed identity at
-  connect time; in-container **device-code** remains the fallback (and the
-  admin-bootstrap path). Both are independent of the ingress identity, so an
-  operator/app can connect into a client tenant after passing the gate.
-- **Scale** — `minReplicas 0` (scale-to-zero) / `maxReplicas 1`. The single cap
-  remains until the concurrent per-tenant connection pool ships (v12 **Phase 4b**,
-  deferred): the authenticated session is still one in-memory `pwsh` process.
-  Durable state on the Azure Files volume survives cold starts.
+- **Graph/EXO auth** — **app-only certificate** per tenant, cert fetched from Key
+  Vault via the Container App's managed identity at connect time. As of v12
+  **Phase 4b**, delegated/device-code is **refused in-container** (it would put
+  one user's token in a shared session — the bleed 4b fixes) and survives only as
+  the localhost-dev fallback. The connection identity is always the app service
+  principal, independent of the ingress identity.
+- **Sessions** — a **per-tenant pool** (`sessions.js`): each tenant slug has its
+  own `pwsh` process, connection state, FIFO queue, and browse/dashboard caches
+  (v12 Phase 4b, replacing v11's single process-global session). Sessions start
+  lazily and are evicted after 30 min idle. Concurrency is across tenants; within
+  a tenant, commands still serialize.
+- **Scale** — `minReplicas 0` (scale-to-zero) / `maxReplicas 1`. Sessions are
+  in-memory per replica, so lifting `maxReplicas` requires ACA **session
+  affinity** (not yet done). Durable state on the Azure Files volume survives
+  cold starts.
 - **Storage** — an Azure Files share linked to the environment and mounted at
   `DATA_DIR` (`/app/data`).
 
@@ -135,10 +141,11 @@ admin/assignment *before* it goes live, or every operator is 403'd. The admin UI
 ## Open architectural questions
 
 - **v12 RBAC — SHIPPED** (v12.0.0). See the section above and ADR-0006/0007.
-- **Per-tenant app-only (certificate) Graph auth — SHIPPED (Phase 4a).** Still
-  open: **Phase 4b** — the concurrent per-tenant connection pool that retires the
-  single in-memory session and lifts `maxReplicas 1`; deferred until live
-  multi-tenant traffic can validate it.
+- **Per-tenant app-only (certificate) Graph auth — SHIPPED (Phase 4a).**
+- **Phase 4b — per-tenant session pool — SHIPPED (v12.1.0).** Retired the single
+  in-memory session; app-only enforced in-container; audit hash chain. Still
+  open: lifting `maxReplicas 1` needs ACA session affinity; switch-tenant-after-
+  connect UI; first live exercise of the app-only path in the deployed tool.
 - **Group-claim overage fallback** — `auth.js` flags overage but the Graph
   `memberOf` lookup is not built yet; needed before relying on group-based rules
   for users in many groups.

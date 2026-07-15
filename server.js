@@ -33,11 +33,12 @@ const fs = require("fs");
 const os = require("os");
 const { REPORTS, findReport, buildCommand, allAreas } = require("./reports.js");
 const { saveSnapshot, listSnapshots, loadSnapshot, deleteSnapshot, diffRows } = require("./snapshots.js");
-const { audit, readAudit, setConnectionIdentityProvider } = require("./audit.js");
+const { audit, readAudit, verifyAuditChain, setConnectionIdentityProvider } = require("./audit.js");
 const { PACKS, findPack } = require("./packs.js");
 const { userMiddleware } = require("./auth.js");
 const rbac = require("./rbac.js");
 const tenants = require("./tenants.js");
+const sessions = require("./sessions.js");
 
 const app = express();
 const PORT = process.env.PORT || 3365;
@@ -80,8 +81,9 @@ const DATA_DIR = process.env.DATA_DIR || process.cwd();
 try { rbac.initStore(CONFIG.tenants); } catch (e) { console.error("  RBAC store init failed:", e.message); }
 
 // ── Temp directory ──────────────────────────────────────────────────
-const TEMP_DIR = path.join(os.tmpdir(), "m365-admin-reports");
-if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
+// TEMP_DIR now lives in sessions.js (the pwsh engine owns IPC scratch). Sweep
+// stale IPC files here so a crashed job can't leak temp files indefinitely.
+const TEMP_DIR = sessions.TEMP_DIR;
 setInterval(() => {
   try {
     const cut = Date.now() - 600000;
@@ -173,238 +175,56 @@ async function detectPowerShell() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
-//  PERSISTENT SESSION
+//  SESSION POOL WIRING (v12 Phase 4b)
+//
+//  The per-tenant PowerShell engine + pool live in sessions.js. v11's single
+//  process-global session/connection/queue is gone: each tenant slug gets its
+//  own pwsh process, connection state, and FIFO queue. This removes the
+//  shared-session credential bleed (a second user's reports ran against
+//  whoever connected last). server.js injects PowerShell detection + the
+//  logger, then resolves the caller's tenant session per request.
 // ══════════════════════════════════════════════════════════════════════
+sessions.configure({ getPS: () => detectedPS, log, moduleFix: MODULE_PATH_FIX });
+const { jobs } = sessions;
+// Evict tenant sessions idle > 30 min (frees the pwsh process + staged cert).
+sessions.startEviction(30 * 60 * 1000);
 
-let psProc = null, psAlive = false;
+// Audit "connection" identity: under the per-tenant pool there is no single
+// global connection. Per-entry connection detail is recorded at each call site;
+// this global provider is retained only for the local-dev single session.
+setConnectionIdentityProvider(() => {
+  const s = sessions.peekSession("local");
+  return s ? s.connectionInfo.account : null;
+});
 
-function startSession() {
-  if (!detectedPS.exe) return;
-  log(`Starting session: ${detectedPS.exe}`);
-  // -NonInteractive is required: without it PSReadLine loads and renders the
-  // session as a terminal, emitting escape sequences that swallow MSAL's
-  // device-code prompt. With it, `Connect-MgGraph -UseDeviceAuthentication`
-  // prints the code as a clean line we can capture and surface to the UI.
-  psProc = spawn(detectedPS.exe, ["-NoProfile", "-NonInteractive", "-NoExit", "-Command", "-"], { env: { ...process.env }, stdio: ["pipe", "pipe", "pipe"], shell: false });
-  psAlive = true;
-  log(`Session PID: ${psProc.pid}`);
-
-  psProc.stdout.on("data", d => {
-    const s = d.toString();
-    // MSAL device-code prompt, e.g. "To sign in, use a web browser to open the
-    // page https://microsoft.com/devicelogin and enter the code ABCD1234 to
-    // authenticate." Capture it so the UI can display the link + code instead
-    // of the operator having to tail the server/container console.
-    const m = s.match(/open the page\s+(\S+)\s+and enter the code\s+([A-Za-z0-9]+)/i);
-    if (m) { deviceCode = { url: m[1], code: m[2], at: Date.now() }; log(`[device-code] enter ${deviceCode.code} at ${deviceCode.url}`); }
-    const t = s.trim();
-    if (t && t.length < 300) log(`[PS out] ${t}`);
-  });
-  psProc.stderr.on("data", d => { const t = d.toString().replace(/\x1b\[[0-9;]*m/g, "").trim(); if (t && !t.startsWith(">>")) log(`[PS err] ${t.slice(0, 200)}`); });
-  psProc.on("close", code => { log(`Session closed (${code})`); psAlive = false; });
-  psProc.on("error", err => { log(`Session error: ${err.message}`); psAlive = false; });
-
-  const init = `$ErrorActionPreference='Continue';$ProgressPreference='SilentlyContinue'\n${MODULE_PATH_FIX}\n@('Microsoft.Graph.Authentication','Microsoft.Graph.Users','Microsoft.Graph.Groups','Microsoft.Graph.Identity.DirectoryManagement','Microsoft.Graph.Identity.SignIns','Microsoft.Graph.Reports','Microsoft.Graph.DeviceManagement','Microsoft.Graph.Sites','Microsoft.Graph.Files')|ForEach-Object{if(Get-Module -ListAvailable -Name $_ -EA SilentlyContinue){Import-Module $_ -EA SilentlyContinue}}\nif(Get-Module -ListAvailable -Name ExchangeOnlineManagement -EA SilentlyContinue){Import-Module ExchangeOnlineManagement -EA SilentlyContinue}\nWrite-Host "[M365] Session initialized"`;
-  psProc.stdin.write(init + "\n");
+// Local dev uses one implicit session ("local"); deployed callers name their
+// tenant (the UI sends the selected tenant slug on every data request).
+function slugForReq(req, explicit) {
+  if (req.user && req.user.source === "local-dev") return explicit || "local";
+  return explicit || null;
 }
 
-// ══════════════════════════════════════════════════════════════════════
-//  FILE-BASED COMMAND EXECUTION
-// ══════════════════════════════════════════════════════════════════════
-
-const jobs = new Map();
-let connectionInfo = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null };
-// Most recent device-code prompt ({ url, code, at }), surfaced to the client
-// during a device-code connect. Null when none is pending.
-let deviceCode = null;
-setConnectionIdentityProvider(() => connectionInfo.account || null);
-let entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
-
-// ── Job queue ─────────────────────────────────────────────────────────
-// The persistent pwsh session has ONE stdin. Concurrent jobs would
-// interleave scripts and corrupt each other's output, so all session
-// commands flow through a FIFO queue: one command in flight at a time.
-const jobQueue = [];
-let activeJobId = null;
-
-function runInSession(command, jobId, opts = {}) {
-  const session = { status: "queued", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null };
-  jobs.set(jobId, session);
-  jobQueue.push({ command, jobId, opts });
-  pumpQueue();
-  return jobId;
-}
-
-function pumpQueue() {
-  if (activeJobId !== null || jobQueue.length === 0) return;
-  const item = jobQueue.shift();
-  activeJobId = item.jobId;
-  executeInSession(item);
-}
-
-function finishActive() { activeJobId = null; setImmediate(pumpQueue); }
-
-// Structured envelope: runs the command capturing ALL PowerShell streams
-// (output, error, warning, information) and writes a single JSON envelope
-// to the .out file. This replaces the old wrapper whose & { } block
-// swallowed diagnostics (errors went to .err with no context — the root
-// of the long SharePoint debugging saga).
-function buildStructuredScript(command, shortId, outFile, doneFile, esc) {
-  return `# Job: ${shortId} (structured)
-$__data = @(); $__errs = @(); $__warns = @(); $__infos = @()
-try {
-  $__all = & {
-${command}
-  } *>&1
-  foreach ($__x in $__all) {
-    if ($__x -is [System.Management.Automation.ErrorRecord]) { $__errs += $__x.ToString() }
-    elseif ($__x -is [System.Management.Automation.WarningRecord]) { $__warns += $__x.ToString() }
-    elseif ($__x -is [System.Management.Automation.InformationRecord]) { $__infos += $__x.ToString() }
-    elseif ($__x -is [System.Management.Automation.VerboseRecord]) { }
-    elseif ($__x -is [System.Management.Automation.DebugRecord]) { }
-    else { $__data += $__x }
+// Resolve (and authorize) the tenant session for a request. On failure it sends
+// the error response and returns null. `requireGraph` → 409 if not connected.
+function resolveSession(req, res, { requireGraph = false } = {}) {
+  const explicit = (req.body && req.body.tenant) || req.query.tenant || null;
+  const slug = slugForReq(req, explicit);
+  if (!slug) { res.status(400).json({ error: "No tenant selected" }); return null; }
+  // Tenant authorization (admins + local-dev bypass inside rbac.can). Never
+  // trust the client's tenant choice without re-checking here.
+  if (slug !== "local" && !rbac.can(req.user, { tenant: slug }, rbac.getStore())) {
+    denyAudit(req, res, 403, "Not authorized for this tenant", { tenant: slug }); return null;
   }
-} catch {
-  $__errs += $_.Exception.Message
-  if ($_.ScriptStackTrace) { $__errs += $_.ScriptStackTrace }
-}
-[PSCustomObject]@{ Success = ($__errs.Count -eq 0); Data = $__data; Errors = $__errs; Warnings = $__warns; Information = $__infos } | ConvertTo-Json -Depth 7 -WarningAction SilentlyContinue | Out-File -FilePath '${esc(outFile)}' -Encoding utf8 -Width 99999
-'done' | Out-File -FilePath '${esc(doneFile)}' -Encoding utf8`;
+  const s = sessions.getSession(slug);
+  if (requireGraph && !s.connectionInfo.graphConnected) { res.status(409).json({ error: "Connect to Graph first" }); return null; }
+  return s;
 }
 
-function buildLegacyScript(command, shortId, outFile, errFile, doneFile, esc) {
-  return `# Job: ${shortId}\ntry {\n  $__r = & {\n${command}\n  }\n  if ($null -ne $__r) { $__r | Out-File -FilePath '${esc(outFile)}' -Encoding utf8 -Width 99999 } else { '' | Out-File -FilePath '${esc(outFile)}' -Encoding utf8 }\n} catch {\n  $_.Exception.Message | Out-File -FilePath '${esc(errFile)}' -Encoding utf8\n  $_.ScriptStackTrace | Out-File -FilePath '${esc(errFile)}' -Append -Encoding utf8\n}\n'done' | Out-File -FilePath '${esc(doneFile)}' -Encoding utf8`;
+// Cache browse results (into the tenant session's cache) when a job finishes.
+function cacheWhenDone(s, jobId, key) {
+  const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.output.trim()) { try { let d = JSON.parse(j.output.trim()); if (!Array.isArray(d)) d = [d]; s.entityCache[key] = { data: d, at: Date.now() }; } catch {} } } }, 500);
 }
 
-// Passthrough execution: the command runs at statement level — NOT captured
-// into a variable and NOT piped to Out-Null — so host/Success-stream output
-// (notably the MSAL device-code prompt emitted during Connect-MgGraph) streams
-// to the session stdout live, where startSession()'s handler can surface it.
-// The command writes its own result to __OUTFILE__ (token replaced here).
-function buildRawScript(command, shortId, outFile, errFile, doneFile, esc) {
-  const cmd = command.replace(/__OUTFILE__/g, esc(outFile));
-  return `# Job: ${shortId} (raw)\ntry {\n${cmd}\n} catch {\n  $_.Exception.Message | Out-File -FilePath '${esc(errFile)}' -Encoding utf8\n  $_.ScriptStackTrace | Out-File -FilePath '${esc(errFile)}' -Append -Encoding utf8\n}\n'done' | Out-File -FilePath '${esc(doneFile)}' -Encoding utf8`;
-}
-
-function executeInSession({ command, jobId, opts }) {
-  const { timeout = 300000, structured = false, raw = false } = opts;
-  const session = jobs.get(jobId);
-  session.status = "running";
-  const shortId = jobId.slice(0, 8);
-  log(`[${shortId}] JOB${structured ? " (structured)" : ""}: ${command.replace(/\s+/g, " ").slice(0, 80)}...`);
-
-  if (!psAlive || !psProc || !psProc.stdin || psProc.stdin.destroyed) {
-    session.status = "error"; session.error = "PowerShell session not running."; session.completedAt = new Date().toISOString();
-    finishActive(); return;
-  }
-
-  const outFile = path.join(TEMP_DIR, `${jobId}.out`);
-  const errFile = path.join(TEMP_DIR, `${jobId}.err`);
-  const doneFile = path.join(TEMP_DIR, `${jobId}.done`);
-  const scriptFile = path.join(TEMP_DIR, `${jobId}.ps1`);
-  const esc = s => s.replace(/\\/g, "\\\\");
-
-  const script = structured
-    ? buildStructuredScript(command, shortId, outFile, doneFile, esc)
-    : raw
-      ? buildRawScript(command, shortId, outFile, errFile, doneFile, esc)
-      : buildLegacyScript(command, shortId, outFile, errFile, doneFile, esc);
-  fs.writeFileSync(scriptFile, script, "utf8");
-
-  let jobStderr = "";
-  const stderrW = d => { jobStderr += d.toString().replace(/\x1b\[[0-9;]*m/g, ""); };
-  psProc.stderr.on("data", stderrW);
-
-  try { psProc.stdin.write(`. '${scriptFile.replace(/'/g, "''")}'\n`); } catch (e) {
-    psProc.stderr.removeListener("data", stderrW);
-    session.status = "error"; session.error = e.message; session.completedAt = new Date().toISOString();
-    finishActive(); return;
-  }
-
-  const cleanupFiles = () => setTimeout(() => { for (const f of [scriptFile, outFile, errFile, doneFile]) try { fs.unlinkSync(f); } catch {} }, 5000);
-  const startTime = Date.now();
-  let pollCount = 0;
-  const iv = setInterval(() => {
-    pollCount++;
-    const elapsed = Math.round((Date.now() - startTime) / 1000);
-
-    // Parse error recovery: with dot-sourced files, a parse error means the
-    // file simply didn't run — the session's stdin parser is NOT left
-    // dangling, so nothing must be injected. (v11.4.0 and earlier injected
-    // "\n)\n\n" here — a relic of pre-file-IPC piping — and that lone ")"
-    // itself threw a parse error that the NEXT queued job's stderr watcher
-    // caught, cascading one bad report into failures of the following jobs.)
-    if (jobStderr && (jobStderr.includes("ParserError") || jobStderr.includes("ParseException")) && !fs.existsSync(doneFile)) {
-      clearInterval(iv); psProc.stderr.removeListener("data", stderrW);
-      log(`[${shortId}] PARSE ERROR — command file failed to parse`);
-      session.status = "error"; session.error = `Parse error:\n${jobStderr.trim()}`; session.completedAt = new Date().toISOString();
-      cleanupFiles(); finishActive();
-      return;
-    }
-
-    // Check done FIRST (before timeout)
-    if (fs.existsSync(doneFile)) {
-      clearInterval(iv); psProc.stderr.removeListener("data", stderrW);
-      log(`[${shortId}] DONE after ${elapsed}s`);
-      let raw = "";
-      try { if (fs.existsSync(outFile)) { raw = fs.readFileSync(outFile, "utf8").trim(); if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); } } catch {}
-
-      if (structured) {
-        try {
-          const env = JSON.parse(raw);
-          let data = env.Data;
-          if (data !== null && data !== undefined && !Array.isArray(data)) data = [data];
-          session.output = (data && data.length) ? JSON.stringify(data) : "";
-          session.error = Array.isArray(env.Errors) ? env.Errors.join("\n") : (env.Errors || "");
-          const extra = [].concat(env.Warnings || [], env.Information || []);
-          session.info = extra.join("\n");
-          session.status = (session.error && !session.output) ? "error" : "completed";
-        } catch (e) {
-          session.output = raw;
-          session.error = `Envelope parse failed: ${e.message}`;
-          session.status = "error";
-        }
-      } else {
-        session.output = raw;
-        try { if (fs.existsSync(errFile)) { session.error = fs.readFileSync(errFile, "utf8").trim(); if (session.error.charCodeAt(0) === 0xFEFF) session.error = session.error.slice(1); } } catch {}
-        session.status = (session.error && !session.output) ? "error" : "completed";
-      }
-      session.completedAt = new Date().toISOString();
-      log(`[${shortId}] Status: ${session.status} | Out: ${session.output.length}c | Err: ${session.error.slice(0, 100)}`);
-      cleanupFiles(); finishActive();
-      return;
-    }
-
-    // Timeout
-    if (Date.now() - startTime > timeout) {
-      clearInterval(iv); psProc.stderr.removeListener("data", stderrW);
-      log(`[${shortId}] TIMEOUT ${elapsed}s`);
-      try { if (fs.existsSync(errFile)) { session.error = fs.readFileSync(errFile, "utf8").trim(); } } catch {}
-      if (!session.error) session.error = `Timed out after ${elapsed}s.`;
-      session.status = "error"; session.completedAt = new Date().toISOString();
-      finishActive();
-      return;
-    }
-
-    if (pollCount % 10 === 0) log(`[${shortId}] Polling ${elapsed}s...`);
-  }, 500);
-}
-
-function runOneShot(command, jobId, { timeout = 600000 } = {}) {
-  const session = { status: "running", output: "", error: "", startedAt: new Date().toISOString(), completedAt: null };
-  jobs.set(jobId, session);
-  if (!detectedPS.exe) { session.status = "error"; session.error = "No PowerShell."; session.completedAt = new Date().toISOString(); return jobId; }
-  const ps = spawn(detectedPS.exe, ["-NoProfile", "-NonInteractive", "-Command", command], { env: { ...process.env }, shell: false, timeout });
-  ps.stdout.on("data", d => { session.output += d.toString(); });
-  ps.stderr.on("data", d => { session.error += d.toString().replace(/\x1b\[[0-9;]*m/g, ""); });
-  ps.on("close", code => { session.status = (code === 0 || session.output.trim()) ? "completed" : "error"; session.completedAt = new Date().toISOString(); });
-  ps.on("error", err => { session.status = "error"; session.error += err.message; session.completedAt = new Date().toISOString(); });
-  return jobId;
-}
-
-function cacheWhenDone(jobId, key) {
-  const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.output.trim()) { try { let d = JSON.parse(j.output.trim()); if (!Array.isArray(d)) d = [d]; entityCache[key] = { data: d, at: Date.now() }; } catch {} } } }, 500);
-}
 
 // ══════════════════════════════════════════════════════════════════════
 //  COMMAND SAFETY
@@ -454,14 +274,6 @@ function denyAudit(req, res, code, reason, extra = {}) {
   return res.status(code).json({ error: reason });
 }
 
-// Map the currently connected Entra tenant to a store tenant slug (or null).
-function connectedTenantSlug() {
-  const tid = connectionInfo.tenantId;
-  if (!tid) return null;
-  const t = (rbac.getStore().tenants || []).find(x => x.tenantId === tid || x.id === tid);
-  return t ? t.id : null;
-}
-
 // Overall access gate — mounted on /api, skips the unauthenticated health probe.
 app.use("/api", (req, res, next) => {
   if (req.path === "/health") return next();
@@ -488,89 +300,127 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Liveness probe (unauthenticated; the access gate skips it). Connection state
+// is per-tenant now, so it moved to /api/connection (authenticated) below.
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", version: VERSION, ...connectionInfo, sessionAlive: psAlive, dockerMode: DOCKER_MODE, ps: { exe: detectedPS.exe, version: detectedPS.version, graphModule: detectedPS.graphModule, graphUsersModule: detectedPS.graphUsersModule, exoModule: detectedPS.exoModule, ready: detectedPS.ready, probing: detectedPS.probing, error: detectedPS.probeError }, platform: os.platform() });
+  res.json({ status: "ok", version: VERSION, dockerMode: DOCKER_MODE, ps: { exe: detectedPS.exe, version: detectedPS.version, graphModule: detectedPS.graphModule, graphUsersModule: detectedPS.graphUsersModule, exoModule: detectedPS.exoModule, ready: detectedPS.ready, probing: detectedPS.probing, error: detectedPS.probeError }, platform: os.platform() });
 });
 
-app.get("/api/logs", (req, res) => { res.json({ logs: diagLog, sessionAlive: psAlive, connectionInfo }); });
+// Per-tenant connection status for the caller's selected tenant. The UI polls
+// this (with ?tenant=slug) to render the connection banner. Does NOT spin up a
+// session — peek only — so polling is cheap and side-effect-free.
+app.get("/api/connection", (req, res) => {
+  const explicit = req.query.tenant || null;
+  const slug = slugForReq(req, explicit);
+  const empty = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null, clientId: null };
+  if (!slug) return res.json({ tenant: null, ...empty });
+  if (slug !== "local" && !rbac.can(req.user, { tenant: slug }, rbac.getStore()))
+    return denyAudit(req, res, 403, "Not authorized for this tenant", { tenant: slug });
+  const s = sessions.peekSession(slug);
+  res.json({ tenant: slug, psReady: detectedPS.ready, ...(s ? s.connectionInfo : empty) });
+});
+
+app.get("/api/logs", (req, res) => {
+  res.json({
+    logs: diagLog, psReady: detectedPS.ready,
+    sessions: sessions.allSessions().map(s => ({ slug: s.slug, alive: s.psAlive, graph: s.connectionInfo.graphConnected, exchange: s.connectionInfo.exchangeConnected, account: s.connectionInfo.account, lastUsedAt: new Date(s.lastUsedAt).toISOString() })),
+  });
+});
 
 app.post("/api/test-session", (req, res) => {
+  const s = sessions.getSession(slugForReq(req, req.body && req.body.tenant) || "local");
   const jobId = uuidv4();
-  runInSession(`[PSCustomObject]@{test='ok';time=(Get-Date -Format o);pid=$PID}|ConvertTo-Json -Compress`, jobId, { timeout: 15000 });
+  sessions.runInSession(s, `[PSCustomObject]@{test='ok';time=(Get-Date -Format o);pid=$PID}|ConvertTo-Json -Compress`, jobId, { timeout: 15000 });
   res.json({ jobId });
 });
 
-app.post("/api/reprobe", async (req, res) => { detectedPS.probing = true; await detectPowerShell(); if (detectedPS.ready && !psAlive) startSession(); res.json({ ps: detectedPS }); });
+// Re-probe PowerShell. Sessions start lazily on first use, so nothing to spin up.
+app.post("/api/reprobe", async (req, res) => { detectedPS.probing = true; await detectPowerShell(); res.json({ ps: detectedPS }); });
 
 app.post("/api/install-graph", (req, res) => {
   if (!detectedPS.exe) return res.status(400).json({ error: "No PowerShell." });
   const jobId = uuidv4();
-  runOneShot(`$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop'\n${MODULE_PATH_FIX}\nWrite-Output "Installing..."\ntry{@('Microsoft.Graph.Authentication','Microsoft.Graph.Users','Microsoft.Graph.Groups','Microsoft.Graph.Identity.DirectoryManagement','Microsoft.Graph.Identity.SignIns','Microsoft.Graph.Reports','Microsoft.Graph.DeviceManagement','Microsoft.Graph.Sites','Microsoft.Graph.Files')|ForEach-Object{Write-Output "  $_...";Install-Module -Name $_ -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop};Write-Output "SUCCESS"}catch{Write-Error "Failed: $($_.Exception.Message)"}`, jobId);
+  sessions.runOneShot(`$ProgressPreference='SilentlyContinue';$ErrorActionPreference='Stop'\n${MODULE_PATH_FIX}\nWrite-Output "Installing..."\ntry{@('Microsoft.Graph.Authentication','Microsoft.Graph.Users','Microsoft.Graph.Groups','Microsoft.Graph.Identity.DirectoryManagement','Microsoft.Graph.Identity.SignIns','Microsoft.Graph.Reports','Microsoft.Graph.DeviceManagement','Microsoft.Graph.Sites','Microsoft.Graph.Files')|ForEach-Object{Write-Output "  $_...";Install-Module -Name $_ -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop};Write-Output "SUCCESS"}catch{Write-Error "Failed: $($_.Exception.Message)"}`, jobId);
   res.json({ jobId });
 });
 
-// ── Connect Graph (interactive browser OR device code) ──────────────
+// ── Connect Graph (app-only cert per tenant; delegated only on localhost) ──
 app.post("/api/connect/graph", (req, res) => {
   const { account, tenantId, useDeviceCode } = req.body || {};
+  const store = rbac.getStore();
+  const explicitSlug = (req.body && req.body.tenant) || null;
+  const appTenant = tenants.tenantBySlug(store, explicitSlug)
+    || (tenantId ? (store.tenants || []).find(t => t.tenantId === tenantId || t.id === tenantId) : null);
+
   // Tenant guard: a non-admin may only connect to a tenant they are granted.
-  if (!rbac.isAdmin(req.user, rbac.getStore())) {
-    const allowed = rbac.allowedTenants(req.user, rbac.getStore());
-    if (tenantId && tenantId.trim()) {
-      if (!allowed.find(t => t.tenantId === tenantId || t.id === tenantId))
-        return denyAudit(req, res, 403, "Not authorized for this tenant", { tenantId });
+  if (!rbac.isAdmin(req.user, store)) {
+    const allowed = rbac.allowedTenants(req.user, store);
+    const wanted = appTenant ? appTenant.id : (explicitSlug || tenantId);
+    if (wanted) {
+      if (!allowed.find(t => t.id === wanted || t.tenantId === wanted))
+        return denyAudit(req, res, 403, "Not authorized for this tenant", { tenant: wanted });
     } else if (allowed.length === 0) {
       return denyAudit(req, res, 403, "No tenant access");
     }
   }
-  // ── App-only (certificate) path ──────────────────────────────────
-  // Preferred when Key Vault is wired and the selected tenant carries cert
-  // config, UNLESS the caller explicitly asked for device code (admin bootstrap).
-  // Falls back to the interactive/device path below otherwise. (Phase 4a: single
-  // session; the concurrent per-tenant pool is Phase 4b.)
-  if (KEY_VAULT_NAME && !useDeviceCode) {
-    const store = rbac.getStore();
-    const appTenant = tenants.tenantBySlug(store, req.body && req.body.tenant)
-      || (tenantId ? (store.tenants || []).find(t => t.tenantId === tenantId || t.id === tenantId) : null);
-    if (tenants.isAppOnlyConfigured(appTenant)) {
-      const jobId = uuidv4();
-      // Pre-register the job so a fast poll doesn't 404 while the cert stages.
-      jobs.set(jobId, { status: "running", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null });
-      deviceCode = null;
-      log(`CONNECT GRAPH (app-only): tenant=${appTenant.id}`);
-      audit(req, "connect.graph", { tenant: appTenant.id, mode: "app-only" });
-      (async () => {
-        try {
-          const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
-          const cmd = tenants.buildGraphAppOnlyConnect(appTenant, cert.path);
-          runInSession(cmd, jobId, { timeout: 120000 });
-          const iv = setInterval(() => {
-            const j = jobs.get(jobId);
-            if (j && j.status !== "running" && j.status !== "queued") {
-              clearInterval(iv);
-              if (j.output && j.output.trim()) {
-                const raw = j.output.trim(); const s = raw.indexOf("{"), e = raw.lastIndexOf("}");
-                if (s !== -1 && e !== -1) { try { const d = JSON.parse(raw.substring(s, e + 1)); connectionInfo.graphConnected = true; connectionInfo.account = d.Account || appTenant.clientId; connectionInfo.tenantId = d.TenantId || appTenant.tenantId; log(`CONNECTED (app-only) as ${connectionInfo.account}`); } catch {} }
-              }
+
+  // ── App-only (certificate) path — the norm in the deployed tool ──────
+  // Connection identity is the app SP (never a person), so all users authorized
+  // for this tenant safely share its session.
+  if (KEY_VAULT_NAME && !useDeviceCode && tenants.isAppOnlyConfigured(appTenant)) {
+    const s = sessions.getSession(appTenant.id);
+    const jobId = uuidv4();
+    // Pre-register the job so a fast poll doesn't 404 while the cert stages.
+    jobs.set(jobId, { status: "running", output: "", error: "", info: "", slug: s.slug, startedAt: new Date().toISOString(), completedAt: null });
+    sessions.clearDeviceCode();
+    log(`CONNECT GRAPH (app-only): tenant=${appTenant.id}`);
+    audit(req, "connect.graph", { tenant: appTenant.id, mode: "app-only", clientId: appTenant.clientId });
+    (async () => {
+      try {
+        const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
+        s.certPath = cert.path;
+        const cmd = tenants.buildGraphAppOnlyConnect(appTenant, cert.path);
+        // raw: the connect command writes its own result to __OUTFILE__ (token
+        // substituted only in raw mode). Without raw the token isn't replaced,
+        // the result isn't captured, and the connect is never detected.
+        sessions.runInSession(s, cmd, jobId, { timeout: 120000, raw: true });
+        const iv = setInterval(() => {
+          const j = jobs.get(jobId);
+          if (j && j.status !== "running" && j.status !== "queued") {
+            clearInterval(iv);
+            if (j.output && j.output.trim()) {
+              const raw = j.output.trim(); const a = raw.indexOf("{"), b = raw.lastIndexOf("}");
+              if (a !== -1 && b !== -1) { try { const d = JSON.parse(raw.substring(a, b + 1)); s.connectionInfo.graphConnected = true; s.connectionInfo.account = d.Account || appTenant.clientId; s.connectionInfo.clientId = d.ClientId || appTenant.clientId; s.connectionInfo.tenantId = d.TenantId || appTenant.tenantId; log(`CONNECTED (app-only) as ${s.connectionInfo.account} [${appTenant.id}]`); } catch {} }
             }
-          }, 500);
-        } catch (e) {
-          log(`APP-ONLY connect failed: ${e.message}`);
-          jobs.set(jobId, { status: "error", output: "", error: `App-only connect failed: ${e.message}`, info: "", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
-        }
-      })();
-      return res.json({ jobId });
-    }
+          }
+        }, 500);
+      } catch (e) {
+        log(`APP-ONLY connect failed: ${e.message}`);
+        jobs.set(jobId, { status: "error", output: "", error: `App-only connect failed: ${e.message}`, info: "", slug: s.slug, startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+      }
+    })();
+    return res.json({ jobId });
   }
 
-  const useDevCode = useDeviceCode || DOCKER_MODE;
-  deviceCode = null; // clear any stale prompt from a prior attempt
-  log(`CONNECT GRAPH: account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${useDevCode}`);
-  audit(req, "connect.graph", { account: account || null, tenantId: tenantId || null, deviceCode: useDevCode });
+  // ── Delegated / device-code path — localhost dev ONLY ────────────────
+  // SECURITY (v12 Phase 4b): refused in the deployed (multi-user) tool. A shared
+  // delegated session would place one user's personal token in front of every
+  // caller — exactly the bleed 4b removes. Delegated auth survives only as the
+  // localhost-dev fallback (single implicit "local" session).
+  if (DOCKER_MODE) {
+    audit(req, "connect.graph.refused", { reason: "delegated-disabled-in-hosted", tenant: explicitSlug || tenantId || null });
+    return res.status(400).json({ error: "Delegated sign-in is disabled in the hosted tool. Select an app-only configured tenant (certificate auth)." });
+  }
+
+  const s = sessions.getSession(slugForReq(req, explicitSlug) || "local");
+  sessions.clearDeviceCode();
+  log(`CONNECT GRAPH (delegated/local): session=${s.slug} account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${!!useDeviceCode}`);
+  audit(req, "connect.graph", { account: account || null, tenantId: tenantId || null, deviceCode: !!useDeviceCode, mode: "delegated" });
 
   const scopes = ["User.Read.All", "Group.Read.All", "Directory.Read.All", "Organization.Read.All", "AuditLog.Read.All", "Reports.Read.All", "Policy.Read.All", "RoleManagement.Read.Directory", "Sites.Read.All", "IdentityRiskyUser.Read.All", "DeviceManagementManagedDevices.Read.All", "DeviceManagementConfiguration.Read.All"];
   let args = `-Scopes "${scopes.join('","')}"`;
   if (tenantId && tenantId.trim()) args += ` -TenantId "${tenantId.replace(/[`$"'{}();&|]/g, "")}"`;
-  if (useDevCode) args += ` -UseDeviceAuthentication`;
+  if (useDeviceCode) args += ` -UseDeviceAuthentication`;
   const safeAcct = account ? account.replace(/[`$"'{}();&|]/g, "") : "";
 
   const jobId = uuidv4();
@@ -578,58 +428,72 @@ app.post("/api/connect/graph", (req, res) => {
   // to stdout live; the context result is written to the job out-file instead.
   const cmd = `try { Disconnect-MgGraph -EA SilentlyContinue } catch {}\n${safeAcct ? `$env:AZURE_USERNAME = "${safeAcct}"\n` : ""}Connect-MgGraph ${args} -ErrorAction Stop\n$ctx = Get-MgContext\n[PSCustomObject]@{Account=$ctx.Account;TenantId=$ctx.TenantId;Scopes=($ctx.Scopes -join ", ")} | ConvertTo-Json -Compress | Out-File -FilePath '__OUTFILE__' -Encoding utf8`;
 
-  runInSession(cmd, jobId, { timeout: useDevCode ? 300000 : 120000, raw: true });
+  sessions.runInSession(s, cmd, jobId, { timeout: useDeviceCode ? 300000 : 120000, raw: true });
 
   const iv = setInterval(() => {
     const j = jobs.get(jobId);
     if (j && j.status !== "running" && j.status !== "queued") {
       clearInterval(iv);
-      deviceCode = null; // sign-in resolved (success or timeout); drop the prompt
+      sessions.clearDeviceCode();
       log(`CONNECT GRAPH done: ${j.status}`);
       if (j.output.trim()) {
         const raw = j.output.trim();
         const js = raw.indexOf("{"), je = raw.lastIndexOf("}");
         if (js !== -1 && je !== -1) {
-          try { const d = JSON.parse(raw.substring(js, je + 1)); connectionInfo.graphConnected = true; connectionInfo.account = d.Account || account; connectionInfo.tenantId = d.TenantId || tenantId; log(`CONNECTED as ${connectionInfo.account}`); } catch {}
+          try { const d = JSON.parse(raw.substring(js, je + 1)); s.connectionInfo.graphConnected = true; s.connectionInfo.account = d.Account || account; s.connectionInfo.tenantId = d.TenantId || tenantId; log(`CONNECTED as ${s.connectionInfo.account}`); } catch {}
         }
-        if (!connectionInfo.graphConnected && !j.error) { connectionInfo.graphConnected = true; connectionInfo.account = account; }
+        if (!s.connectionInfo.graphConnected && !j.error) { s.connectionInfo.graphConnected = true; s.connectionInfo.account = account; }
       }
     }
   }, 500);
   res.json({ jobId });
 });
 
-// ── Connect Exchange ────────────────────────────────────────────────
+// ── Connect Exchange (app-only cert per tenant; delegated only on localhost) ──
 app.post("/api/connect/exchange", (req, res) => {
   const { account } = req.body || {};
-  // App-only (certificate) path — used when the connected/selected tenant has
-  // cert config and Key Vault is wired. Falls back to interactive/device below.
-  if (KEY_VAULT_NAME) {
-    const store = rbac.getStore();
-    const appTenant = tenants.tenantBySlug(store, req.body && req.body.tenant)
-      || (connectionInfo.tenantId ? (store.tenants || []).find(t => t.tenantId === connectionInfo.tenantId || t.id === connectionInfo.tenantId) : null);
-    if (tenants.isAppOnlyConfigured(appTenant)) {
-      const jobId = uuidv4();
-      jobs.set(jobId, { status: "running", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null });
-      audit(req, "connect.exchange", { tenant: appTenant.id, mode: "app-only" });
-      (async () => {
-        try {
-          const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
-          const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, req.body && req.body.org);
-          runInSession(cmd, jobId, { timeout: 120000 });
-          const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output && j.output.trim()) connectionInfo.exchangeConnected = true; } }, 500);
-        } catch (e) {
-          log(`APP-ONLY exchange connect failed: ${e.message}`);
-          jobs.set(jobId, { status: "error", output: "", error: `App-only Exchange connect failed: ${e.message}`, info: "", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
-        }
-      })();
-      return res.json({ jobId });
-    }
+  const store = rbac.getStore();
+  const explicitSlug = (req.body && req.body.tenant) || null;
+  const appTenant = tenants.tenantBySlug(store, explicitSlug);
+
+  // Tenant guard for the app-only path.
+  if (appTenant && !rbac.isAdmin(req.user, store)) {
+    if (!rbac.allowedTenants(req.user, store).find(t => t.id === appTenant.id))
+      return denyAudit(req, res, 403, "Not authorized for this tenant", { tenant: appTenant.id });
   }
-  const useDevCode = DOCKER_MODE;
+
+  // App-only (certificate) path — connects on the tenant's own session.
+  if (KEY_VAULT_NAME && tenants.isAppOnlyConfigured(appTenant)) {
+    const s = sessions.getSession(appTenant.id);
+    const jobId = uuidv4();
+    jobs.set(jobId, { status: "running", output: "", error: "", info: "", slug: s.slug, startedAt: new Date().toISOString(), completedAt: null });
+    audit(req, "connect.exchange", { tenant: appTenant.id, mode: "app-only", clientId: appTenant.clientId });
+    (async () => {
+      try {
+        const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
+        s.certPath = cert.path;
+        const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, req.body && req.body.org);
+        // raw: see the Graph app-only note — the command writes to __OUTFILE__.
+        sessions.runInSession(s, cmd, jobId, { timeout: 120000, raw: true });
+        const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output && j.output.trim()) s.connectionInfo.exchangeConnected = true; } }, 500);
+      } catch (e) {
+        log(`APP-ONLY exchange connect failed: ${e.message}`);
+        jobs.set(jobId, { status: "error", output: "", error: `App-only Exchange connect failed: ${e.message}`, info: "", slug: s.slug, startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+      }
+    })();
+    return res.json({ jobId });
+  }
+
+  // Delegated path — localhost dev ONLY (see the Graph route's security note).
+  if (DOCKER_MODE) {
+    audit(req, "connect.exchange.refused", { reason: "delegated-disabled-in-hosted", tenant: explicitSlug || null });
+    return res.status(400).json({ error: "Delegated sign-in is disabled in the hosted tool. Select an app-only configured tenant (certificate auth)." });
+  }
+  const s = sessions.getSession(slugForReq(req, explicitSlug) || "local");
+  const useDevCode = false; // DOCKER_MODE returned above; localhost uses browser
   const upn = account ? account.replace(/[`$"'{}();&|]/g, "") : "";
-  deviceCode = null; // clear any stale prompt from a prior attempt
-  audit(req, "connect.exchange", { account: upn || null, deviceCode: useDevCode });
+  sessions.clearDeviceCode();
+  audit(req, "connect.exchange", { account: upn || null, deviceCode: useDevCode, mode: "delegated" });
   const jobId = uuidv4();
   // -DisableWAM (EXO 3.7+) skips the WAM broker path whose
   // WithBroker(BrokerOptions) overload is missing when the Graph SDK has
@@ -650,44 +514,52 @@ ${useDevCode ? `if ($exoCmd.Parameters.ContainsKey('Device')) { $exoParams['Devi
     throw ("MSAL assembly conflict between the Graph SDK and ExchangeOnlineManagement in this session. Fixes, in order: (1) Restart Session, then connect EXCHANGE FIRST, then Graph. (2) Update both modules in an elevated PowerShell: Update-Module ExchangeOnlineManagement -Force; Update-Module Microsoft.Graph -Force; then restart the server. Original error: " + $_.Exception.Message)
   } else { throw }
 }`;
-  runInSession(cmd, jobId, { timeout: useDevCode ? 300000 : 120000, raw: true });
-  const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); deviceCode = null; if (j.status === "completed" && j.output.trim()) connectionInfo.exchangeConnected = true; } }, 500);
+  sessions.runInSession(s, cmd, jobId, { timeout: useDevCode ? 300000 : 120000, raw: true });
+  const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); sessions.clearDeviceCode(); if (j.status === "completed" && j.output.trim()) s.connectionInfo.exchangeConnected = true; } }, 500);
   res.json({ jobId });
 });
 
 app.post("/api/disconnect", (req, res) => {
-  audit(req, "disconnect", { account: connectionInfo.account });
+  const s = resolveSession(req, res);
+  if (!s) return;
+  audit(req, "disconnect", { tenant: s.slug, account: s.connectionInfo.account });
   const jobId = uuidv4();
-  runInSession(`try{Disconnect-MgGraph -EA SilentlyContinue}catch{}\ntry{Disconnect-ExchangeOnline -Confirm:$false -EA SilentlyContinue}catch{}\n[PSCustomObject]@{status='disconnected'}|ConvertTo-Json -Compress`, jobId);
-  connectionInfo = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null };
-  entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
-  deviceCode = null;
+  sessions.runInSession(s, `try{Disconnect-MgGraph -EA SilentlyContinue}catch{}\ntry{Disconnect-ExchangeOnline -Confirm:$false -EA SilentlyContinue}catch{}\n[PSCustomObject]@{status='disconnected'}|ConvertTo-Json -Compress`, jobId);
+  s.connectionInfo = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null, clientId: null };
+  s.entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
+  s.dashCache = { at: 0, data: null };
+  sessions.clearDeviceCode();
   res.json({ jobId });
 });
 
 app.post("/api/restart-session", (req, res) => {
-  audit(req, "session.restart", {});
-  if (psProc) try { psProc.kill(); } catch {}
-  psAlive = false;
-  connectionInfo = { graphConnected: false, exchangeConnected: false, account: null, tenantId: null };
-  setTimeout(() => startSession(), 1000);
+  const s = resolveSession(req, res);
+  if (!s) return;
+  audit(req, "session.restart", { tenant: s.slug });
+  sessions.restartSession(s);
   res.json({ status: "restarting" });
 });
 
 // ── Browse ──────────────────────────────────────────────────────────
 app.get("/api/browse/users", (req, res) => {
-  if (entityCache.users.data && (Date.now() - entityCache.users.at) < 300000) return res.json({ cached: true, data: entityCache.users.data });
-  const jobId = uuidv4(); runInSession(`Get-MgUser -All -Property "Id,DisplayName,UserPrincipalName,Mail,Department,JobTitle,AccountEnabled,UserType"|Select-Object Id,DisplayName,UserPrincipalName,Mail,Department,JobTitle,AccountEnabled,UserType|ConvertTo-Json -Depth 3 -Compress`, jobId); cacheWhenDone(jobId, "users"); res.json({ jobId });
+  const s = resolveSession(req, res, { requireGraph: true });
+  if (!s) return;
+  if (s.entityCache.users.data && (Date.now() - s.entityCache.users.at) < 300000) return res.json({ cached: true, data: s.entityCache.users.data });
+  const jobId = uuidv4(); sessions.runInSession(s, `Get-MgUser -All -Property "Id,DisplayName,UserPrincipalName,Mail,Department,JobTitle,AccountEnabled,UserType"|Select-Object Id,DisplayName,UserPrincipalName,Mail,Department,JobTitle,AccountEnabled,UserType|ConvertTo-Json -Depth 3 -Compress`, jobId); cacheWhenDone(s, jobId, "users"); res.json({ jobId });
 });
 app.get("/api/browse/groups", (req, res) => {
-  if (entityCache.groups.data && (Date.now() - entityCache.groups.at) < 300000) return res.json({ cached: true, data: entityCache.groups.data });
-  const jobId = uuidv4(); runInSession(`Get-MgGroup -All -Property "Id,DisplayName,Mail,GroupTypes,SecurityEnabled,MailEnabled,Description"|Select-Object Id,DisplayName,Mail,@{N='Type';E={if($_.GroupTypes -contains 'Unified'){'Microsoft 365'}elseif($_.SecurityEnabled -and $_.MailEnabled){'Mail-Enabled Security'}elseif($_.SecurityEnabled){'Security'}elseif($_.MailEnabled){'Distribution'}else{'Other'}}},@{N='Dynamic';E={if($_.GroupTypes -contains 'DynamicMembership'){'Yes'}else{'No'}}},Description|ConvertTo-Json -Depth 3 -Compress`, jobId); cacheWhenDone(jobId, "groups"); res.json({ jobId });
+  const s = resolveSession(req, res, { requireGraph: true });
+  if (!s) return;
+  if (s.entityCache.groups.data && (Date.now() - s.entityCache.groups.at) < 300000) return res.json({ cached: true, data: s.entityCache.groups.data });
+  const jobId = uuidv4(); sessions.runInSession(s, `Get-MgGroup -All -Property "Id,DisplayName,Mail,GroupTypes,SecurityEnabled,MailEnabled,Description"|Select-Object Id,DisplayName,Mail,@{N='Type';E={if($_.GroupTypes -contains 'Unified'){'Microsoft 365'}elseif($_.SecurityEnabled -and $_.MailEnabled){'Mail-Enabled Security'}elseif($_.SecurityEnabled){'Security'}elseif($_.MailEnabled){'Distribution'}else{'Other'}}},@{N='Dynamic';E={if($_.GroupTypes -contains 'DynamicMembership'){'Yes'}else{'No'}}},Description|ConvertTo-Json -Depth 3 -Compress`, jobId); cacheWhenDone(s, jobId, "groups"); res.json({ jobId });
 });
 app.get("/api/browse/licenses", (req, res) => {
-  if (entityCache.licenses.data && (Date.now() - entityCache.licenses.at) < 300000) return res.json({ cached: true, data: entityCache.licenses.data });
-  const jobId = uuidv4(); runInSession(`Get-MgSubscribedSku -All|Select-Object SkuId,SkuPartNumber,@{N='Total';E={$_.PrepaidUnits.Enabled}},@{N='Assigned';E={$_.ConsumedUnits}},@{N='Available';E={$_.PrepaidUnits.Enabled-$_.ConsumedUnits}}|ConvertTo-Json -Depth 3 -Compress`, jobId); cacheWhenDone(jobId, "licenses"); res.json({ jobId });
+  const s = resolveSession(req, res, { requireGraph: true });
+  if (!s) return;
+  if (s.entityCache.licenses.data && (Date.now() - s.entityCache.licenses.at) < 300000) return res.json({ cached: true, data: s.entityCache.licenses.data });
+  const jobId = uuidv4(); sessions.runInSession(s, `Get-MgSubscribedSku -All|Select-Object SkuId,SkuPartNumber,@{N='Total';E={$_.PrepaidUnits.Enabled}},@{N='Assigned';E={$_.ConsumedUnits}},@{N='Available';E={$_.PrepaidUnits.Enabled-$_.ConsumedUnits}}|ConvertTo-Json -Depth 3 -Compress`, jobId); cacheWhenDone(s, jobId, "licenses"); res.json({ jobId });
 });
-app.post("/api/browse/refresh", (req, res) => { entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } }; res.json({ ok: true }); });
+app.post("/api/browse/refresh", (req, res) => { const s = resolveSession(req, res); if (!s) return; s.entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } }; res.json({ ok: true }); });
 
 // ── Report catalog (server-owned; client renders from this) ─────────
 app.get("/api/reports", (req, res) => {
@@ -710,23 +582,25 @@ app.post("/api/run", (req, res) => {
   if (!reportId) return res.status(400).json({ error: "No reportId" });
   const report = findReport(reportId);
   if (!report) return res.status(404).json({ error: `Unknown report: ${reportId}` });
-  // Authorization: the report must be allowed for the caller in the connected tenant.
-  if (!rbac.can(req.user, { tenant: connectedTenantSlug(), reportId }, rbac.getStore()))
-    return denyAudit(req, res, 403, "Not authorized for this report", { reportId });
+  // Resolve + authorize the tenant session, then check the report for that tenant.
+  const s = resolveSession(req, res);
+  if (!s) return;
+  if (!rbac.can(req.user, { tenant: s.slug, reportId }, rbac.getStore()))
+    return denyAudit(req, res, 403, "Not authorized for this report", { tenant: s.slug, reportId });
   const cmd = buildCommand(report, fields, params);
   const c = isSafe(cmd);
-  if (!c.ok) { log(`RUN ${reportId} REJECTED: ${c.why}`); audit(req, "report.rejected", { reportId, why: c.why }); return res.status(403).json({ error: c.why }); }
-  audit(req, "report.run", { reportId, params: params || null, fields: fields || null });
+  if (!c.ok) { log(`RUN ${reportId} REJECTED: ${c.why}`); audit(req, "report.rejected", { tenant: s.slug, reportId, why: c.why }); return res.status(403).json({ error: c.why }); }
+  audit(req, "report.run", { tenant: s.slug, connection: s.connectionInfo.account, reportId, params: params || null, fields: fields || null });
   const jobId = uuidv4();
   // NOTE: no ConvertTo-Json here — the structured envelope serializes Data.
-  runInSession(cmd, jobId, { structured: true });
+  sessions.runInSession(s, cmd, jobId, { structured: true });
   res.json({ jobId });
 });
 
 app.get("/api/job/:jobId", (req, res) => {
   const s = jobs.get(req.params.jobId);
   if (!s) return res.status(404).json({ error: "Job not found — the run request may have been rejected (check server logs)" });
-  res.json({ status: s.status, output: s.output, error: s.error ? s.error.replace(/\x1b\[[0-9;]*m/g, "") : "", info: s.info || "", startedAt: s.startedAt, completedAt: s.completedAt, deviceCode });
+  res.json({ status: s.status, output: s.output, error: s.error ? s.error.replace(/\x1b\[[0-9;]*m/g, "") : "", info: s.info || "", startedAt: s.startedAt, completedAt: s.completedAt, deviceCode: sessions.latestDeviceCode() });
 });
 
 app.post("/api/export", (req, res) => {
@@ -795,30 +669,19 @@ app.post("/api/diff", guardReport, (req, res) => {
 // held in memory for export and cleared after 30 minutes.
 const packJobs = new Map();
 
-function waitForJob(jobId, timeout = 320000) {
-  return new Promise(resolve => {
-    const start = Date.now();
-    const iv = setInterval(() => {
-      const j = jobs.get(jobId);
-      if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); resolve(j); }
-      else if (Date.now() - start > timeout) { clearInterval(iv); resolve(j || { status: "error", error: "Pack step timed out", output: "" }); }
-    }, 500);
-  });
-}
-
-async function runPack(packJob, pack, { snapshot, label }) {
+async function runPack(packJob, pack, s, { snapshot, label }) {
   for (const rid of pack.reports) {
     const report = findReport(rid);
     const entry = packJob.results.find(r => r.reportId === rid);
     if (!report) { entry.status = "error"; entry.error = "Unknown report"; continue; }
-    if (report.ex && !connectionInfo.exchangeConnected) { entry.status = "skipped"; entry.error = "Exchange not connected"; continue; }
+    if (report.ex && !s.connectionInfo.exchangeConnected) { entry.status = "skipped"; entry.error = "Exchange not connected"; continue; }
     entry.status = "running";
     const cmd = buildCommand(report, null, {});
     const c = isSafe(cmd);
     if (!c.ok) { entry.status = "error"; entry.error = c.why; continue; }
     const jobId = uuidv4();
-    runInSession(cmd, jobId, { structured: true });
-    const j = await waitForJob(jobId);
+    sessions.runInSession(s, cmd, jobId, { structured: true });
+    const j = await sessions.waitForJob(jobId);
     if (j.status === "completed" && j.output) {
       try {
         let rows = JSON.parse(j.output);
@@ -856,14 +719,14 @@ app.post("/api/pack/run", (req, res) => {
   const { packId, snapshot = true, label } = req.body || {};
   const pack = findPack(packId);
   if (!pack) return res.status(404).json({ error: `Unknown pack: ${packId}` });
-  if (!connectionInfo.graphConnected) return res.status(409).json({ error: "Connect to Graph before running a pack" });
+  const s = resolveSession(req, res, { requireGraph: true });
+  if (!s) return;
   // Authorization: every report in the pack must be allowed for the caller.
-  const tenantSlug = connectedTenantSlug();
   const store = rbac.getStore();
-  const denied = pack.reports.filter(rid => !rbac.can(req.user, { tenant: tenantSlug, reportId: rid }, store));
-  if (denied.length) return denyAudit(req, res, 403, "Not authorized for one or more reports in this pack", { packId, denied });
+  const denied = pack.reports.filter(rid => !rbac.can(req.user, { tenant: s.slug, reportId: rid }, store));
+  if (denied.length) return denyAudit(req, res, 403, "Not authorized for one or more reports in this pack", { tenant: s.slug, packId, denied });
   const cleanLabel = label ? String(label).slice(0, 120) : "";
-  audit(req, "pack.run", { packId, snapshot: !!snapshot, label: cleanLabel || null });
+  audit(req, "pack.run", { tenant: s.slug, packId, snapshot: !!snapshot, label: cleanLabel || null });
   const packJob = {
     id: uuidv4(),
     packId,
@@ -873,7 +736,7 @@ app.post("/api/pack/run", (req, res) => {
     results: pack.reports.map(rid => { const r = findReport(rid); return { reportId: rid, name: r ? r.name : rid, status: "pending", rowCount: null, error: null, snapshotId: null, rows: null }; }),
   };
   packJobs.set(packJob.id, packJob);
-  runPack(packJob, pack, { snapshot: !!snapshot, label: cleanLabel }); // fire and forget
+  runPack(packJob, pack, s, { snapshot: !!snapshot, label: cleanLabel }); // fire and forget
   res.json({ packJobId: packJob.id });
 });
 
@@ -895,9 +758,8 @@ app.get("/api/pack/job/:id/rows/:reportId", (req, res) => {
 
 // ── Dashboard ───────────────────────────────────────────────────────
 // One aggregated Graph pass using $count queries (ConsistencyLevel:
-// eventual) — cheap even on large tenants. Cached for 5 minutes;
-// ?refresh=1 forces a re-run.
-let dashCache = { at: 0, data: null };
+// eventual) — cheap even on large tenants. Cached for 5 minutes per tenant
+// session; ?refresh=1 forces a re-run.
 const DASH_CMD = `$H = @{ ConsistencyLevel = 'eventual' }
 $totalUsers = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/users?$count=true&$top=1&$select=id' -Headers $H)['@odata.count']
 $disabled = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/users?$filter=accountEnabled%20eq%20false&$count=true&$top=1&$select=id' -Headers $H)['@odata.count']
@@ -920,23 +782,24 @@ $ca = (Invoke-MgGraphRequest -Method GET -Uri 'https://graph.microsoft.com/v1.0/
 }`;
 
 app.get("/api/dashboard", async (req, res) => {
-  if (!connectionInfo.graphConnected) return res.status(409).json({ error: "Connect to Graph first" });
+  const s = resolveSession(req, res, { requireGraph: true });
+  if (!s) return;
   const force = req.query.refresh === "1";
-  if (!force && dashCache.data && Date.now() - dashCache.at < 5 * 60 * 1000) {
-    return res.json({ ...dashCache.data, cachedAt: new Date(dashCache.at).toISOString(), cached: true });
+  if (!force && s.dashCache.data && Date.now() - s.dashCache.at < 5 * 60 * 1000) {
+    return res.json({ ...s.dashCache.data, cachedAt: new Date(s.dashCache.at).toISOString(), cached: true });
   }
   const c = isSafe(DASH_CMD);
   if (!c.ok) return res.status(500).json({ error: c.why }); // defense-in-depth; should never fire
-  audit(req, "dashboard.refresh", { forced: force });
+  audit(req, "dashboard.refresh", { tenant: s.slug, forced: force });
   const jobId = uuidv4();
-  runInSession(DASH_CMD, jobId, { structured: true });
-  const j = await waitForJob(jobId, 120000);
+  sessions.runInSession(s, DASH_CMD, jobId, { structured: true });
+  const j = await sessions.waitForJob(jobId, 120000);
   if (j.status !== "completed" || !j.output) return res.status(502).json({ error: j.error || "Dashboard query failed" });
   try {
     let data = JSON.parse(j.output);
     if (Array.isArray(data)) data = data[0] || {};
-    dashCache = { at: Date.now(), data };
-    res.json({ ...data, cachedAt: new Date(dashCache.at).toISOString(), cached: false });
+    s.dashCache = { at: Date.now(), data };
+    res.json({ ...data, cachedAt: new Date(s.dashCache.at).toISOString(), cached: false });
   } catch (e) { res.status(502).json({ error: `Dashboard parse failed: ${e.message}` }); }
 });
 
@@ -952,7 +815,9 @@ app.get("/api/config", (req, res) => {
 });
 app.get("/api/audit", requireAdmin, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
-  res.json({ entries: readAudit(limit) });
+  // integrity = the tamper-evident hash chain's verdict (Phase 4b).
+  let integrity; try { integrity = verifyAuditChain(); } catch (e) { integrity = { ok: false, error: e.message }; }
+  res.json({ entries: readAudit(limit), integrity });
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1116,9 +981,12 @@ app.get("*", (req, res) => res.sendFile(path.join(__dirname, "public", "index.ht
 (async () => {
   console.log(`\n  M365 Admin Reports Server v${VERSION}\n`);
   await detectPowerShell();
-  if (detectedPS.exe) startSession();
-  app.listen(PORT, HOST, () => { console.log(`  → http://localhost:${PORT} (bound to ${HOST})\n  → Session: ${psAlive ? "ALIVE" : "NOT RUNNING"}\n`); });
+  // Tenant sessions start lazily on first connect (per-tenant pool, Phase 4b);
+  // nothing to spin up at boot.
+  app.listen(PORT, HOST, () => { console.log(`  → http://localhost:${PORT} (bound to ${HOST})\n  → PowerShell: ${detectedPS.ready ? "READY" : "NOT READY"} | sessions start on demand\n`); });
 })();
 
-process.on("SIGINT", () => { if (psProc) try { psProc.kill(); } catch {} process.exit(0); });
-process.on("SIGTERM", () => { if (psProc) try { psProc.kill(); } catch {} process.exit(0); });
+// Tear down every tenant session's pwsh on exit (don't orphan child processes).
+function shutdown() { for (const s of sessions.allSessions()) { try { s.psProc && s.psProc.kill(); } catch {} } process.exit(0); }
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

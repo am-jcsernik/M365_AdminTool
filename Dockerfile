@@ -97,6 +97,10 @@ RUN npm ci --omit=dev
 COPY server.js reports.js packs.js snapshots.js audit.js ./
 # v12 RBAC modules — server.js require()s these, so they MUST be in the image.
 COPY auth.js rbac.js tenants.js keyvault.js ./
+# v12 Phase 4b — the per-tenant session pool; server.js require()s it. Omitting
+# it crash-loops the image on boot (MODULE_NOT_FOUND). See ADR-0007's Dockerfile
+# COPY note: this explicit list must track every module server.js requires.
+COPY sessions.js ./
 COPY scripts/ ./scripts/
 COPY public/ ./public/
 COPY config.json.example ./
