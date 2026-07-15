@@ -4,6 +4,60 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.0.0] — 2026-07-15
+
+Multi-user, default-deny **RBAC** — the tool moves from "single admin on
+localhost" to a small multi-user service with three access tiers: who may open
+the tool → which tenants → which reports/areas. Ships as one major version.
+Full design in ADR-0006/0007 and `docs/PLAN-v12-rbac.md`.
+
+### Added
+- **Identity (`auth.js`).** Acting user resolved from Azure Container Apps Easy
+  Auth (`X-MS-CLIENT-PRINCIPAL*`), trusted only when present; a synthetic
+  full-admin identity on the local bind so localhost dev is unchanged. Group
+  overage flagged.
+- **Authorization store + engine (`rbac.js`).** Writable store at
+  `DATA_DIR/access/rbac.json` (non-secret metadata only; mtime-cached, atomic
+  writes) and a default-deny engine: named reusable roles scoping tenants +
+  areas/report-ids, assigned to users or Entra groups; access is the union of
+  all matching roles.
+- **Enforcement (`server.js`).** A `/api` access gate + per-route tenant/report
+  guards; `/api/reports` and `/api/config` filtered to the caller; admin-only
+  management + `/api/audit`. Every deny is audited.
+- **App-only certificate connect per tenant (`tenants.js`, `keyvault.js`).**
+  Cert fetched from Key Vault via the Container App managed identity at connect
+  time (no `@azure/*` SDKs — REST + built-in `fetch`); device code retained as
+  fallback and admin-bootstrap path.
+- **Admin UI (`public/index.html`).** An admin-gated **Access Control** panel —
+  tenants, roles, assignments, and bootstrap group ids — with a friendly-name
+  tenant dropdown. No hand-editing of JSON.
+- **Admin management API.** `requireAdmin`-gated CRUD under `/api/admin/*`
+  (store, tenants, roles, assignments, groups), each writing atomically through
+  `rbac.saveStore` and audited. Deletes cascade (tenant→roles, role→assignments).
+- **Integration test suite (`test/`, `npm test`).** Node's built-in runner boots
+  the real server and drives the full guard matrix (401/403/filtering/admin
+  CRUD/cascade) offline — no Graph/PowerShell required.
+- **New env vars.** `ACCESS_GROUP_ID`, `ADMIN_GROUP_ID`, `KEY_VAULT_NAME`
+  (see README).
+
+### Changed
+- Audit now records **two identities** per action: the acting user (Easy Auth)
+  and the connection identity (per-tenant app service principal).
+- Docs updated for the new identity/authZ/connection model: `README.md`
+  (access-control admin + end-user guide), `PERMISSIONS.md` (application vs
+  delegated scopes), `docs/ARCHITECTURE.md`.
+
+### Fixed
+- **Dockerfile `COPY`** now ships `auth.js`, `rbac.js`, `tenants.js`,
+  `keyvault.js` — without this the v12 image crash-looped on boot.
+
+### Deferred
+- **Phase 4b** — the concurrent per-tenant connection pool that retires the
+  single in-memory session and lifts `maxReplicas 1`; needs live multi-tenant
+  traffic to validate.
+- **Group-claim overage fallback** — the Graph `memberOf` lookup for users in
+  too many groups (overage is flagged but not yet resolved).
+
 ## [11.12.2] — 2026-07-14
 
 ### Fixed

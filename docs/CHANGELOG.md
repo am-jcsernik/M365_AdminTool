@@ -3,9 +3,39 @@
 All notable changes to deliverables in this project are documented here.
 Format based on [Keep a Changelog](https://keepachangelog.com/); versioning is [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [12.0.0] — 2026-07-15
 ### Added
+- **v12 multi-user RBAC** (one major version on `feature/v12-rbac`). Three access
+  tiers: who may use the tool → which tenants → which reports/areas.
+  - **Phase 0 (infra):** Key Vault, app managed identity, Entra access/admin
+    groups, per-tenant app-only app registration + KV certificate + admin
+    consent. Idempotent `deploy/Provision-RbacPhase0.ps1`; gated Bicep additions.
+  - **Phase 1 (authN):** `auth.js` resolves the acting user from Easy Auth
+    headers; audit records both the acting user and the connection identity.
+  - **Phase 2 (authZ):** `rbac.js` default-deny engine + writable store
+    (`DATA_DIR/access/rbac.json`); named reusable roles scoping tenants +
+    areas/reports; `reports.js` area index.
+  - **Phase 3 (enforcement):** per-request access gate + tenant/report guards on
+    the API; `/api/reports` and `/api/config` filtered to the caller; admin-only
+    `/api/audit`; every deny audited.
+  - **Phase 4a (connection):** app-only certificate connect per tenant, cert
+    fetched from Key Vault via the managed identity (`keyvault.js`, `tenants.js`);
+    device code retained as default/fallback.
+  - **Phase 5 (admin UI):** admin-gated **Access Control** panel in
+    `public/index.html` (tenants, roles, assignments, bootstrap group ids) +
+    `requireAdmin` CRUD API under `/api/admin/*`, writing atomically via
+    `rbac.saveStore`; deletes cascade; `/api/config` exposes an `admin` flag.
+  - **Phase 6 (release):** integration test suite (`test/`, `npm test`) covering
+    the guard matrix offline; docs refreshed (`README.md`, `PERMISSIONS.md`,
+    `docs/ARCHITECTURE.md`); bumped to **v12.0.0**.
+  - **Deferred:** Phase 4b (concurrent per-tenant pool + `maxReplicas` lift) and
+    the group-claim overage fallback.
 - Initial project scaffold.
+
+### Fixed
+- **Dockerfile `COPY`** now includes `auth.js`, `rbac.js`, `tenants.js`,
+  `keyvault.js` — without this the v12 image would crash on boot (server.js
+  require()s them).
 - **App source brought under version control** and promoted as the tracked
   baseline (was an untracked working copy). Deliverable now versioned in the
   repo-root `CHANGELOG.md`, which is authoritative for the app.

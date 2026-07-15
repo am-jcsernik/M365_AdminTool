@@ -18,9 +18,11 @@
          Container Apps built-in authentication (Easy Auth), restricting
          sign-in to the specified home tenant.
 
-    The tool has NO application-level authorization yet (RBAC is v12), so
-    Easy Auth is the gate that keeps the endpoint from being an open,
-    tenant-admin-privileged surface. See deploy/README.md and RBAC-ROADMAP.md.
+    As of v12, Easy Auth is the OUTER ingress gate and in-app RBAC enforces
+    authorization inside it (which tenants/reports each caller may use). Pass
+    -AdminGroupId (and optionally -AccessGroupId / -KeyVaultName -DeployKeyVault)
+    so the store seeds correctly; otherwise enforcement locks everyone out. See
+    deploy/README.md, PERMISSIONS.md, and docs/ARCHITECTURE.md.
 
     Scale model is min 0 / max 1 (set in main.bicep). Because the authenticated
     Graph/Exchange session is held in a single in-memory pwsh process, the
@@ -48,6 +50,23 @@
 .PARAMETER Tag
     Image tag. Defaults to the version in package.json.
 
+.PARAMETER KeyVaultName
+    v12 RBAC: Key Vault holding per-tenant app-only certificates. Setting this
+    (or -DeployKeyVault) enables app-only certificate connect.
+
+.PARAMETER DeployKeyVault
+    v12 RBAC: create the Key Vault (RBAC-auth) and grant the app identity read.
+    Requires -KeyVaultName. Omit to reuse a vault provisioned out-of-band
+    (e.g. by Provision-RbacPhase0.ps1).
+
+.PARAMETER AccessGroupId
+    v12 RBAC: Entra access-group object id (overall-access gate), seeded on first run.
+
+.PARAMETER AdminGroupId
+    v12 RBAC: Entra admin-group object id; members get the in-tool admin role.
+    Strongly recommended — without it (and without a pre-seeded admin) v12
+    enforcement 403s every operator.
+
 .PARAMETER WhatIf
     Print the planned steps and az commands without executing them.
 
@@ -73,7 +92,19 @@ param(
     [string] $FileShareName    = 'm365data',
     [string] $Tag,
     [string] $AppRegName       = 'M365 Admin Reports (Easy Auth)',
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+
+    # ── v12 RBAC ──────────────────────────────────────────────────────
+    # Provide a Key Vault name to enable app-only certificate connect (the
+    # vault is created + the app identity granted read when -DeployKeyVault).
+    [string] $KeyVaultName,
+    [switch] $DeployKeyVault,
+    # Bootstrap group ids seed the store's access/admin gates on first run.
+    # WARNING: with enforcement live, an EMPTY AdminGroupId AND no pre-seeded
+    # admin/assignment 403s every operator. Pass at least AdminGroupId (whose
+    # members you have already added) so you retain access after deploy.
+    [string] $AccessGroupId,
+    [string] $AdminGroupId
 )
 
 $ErrorActionPreference = 'Stop'
@@ -229,9 +260,23 @@ $deployArgs = @(
         "acrPassword=$AcrPassword",
         "storageAccountName=$StorageAccountName",
         "storageAccountKey=$StorageKey",
-        "fileShareName=$FileShareName",
-    '--query','properties.outputs.appFqdn.value','-o','tsv'
+        "fileShareName=$FileShareName"
 )
+# ── v12 RBAC parameters (additive; safe defaults keep pre-v12 behavior) ──
+# Only the explicit -DeployKeyVault switch creates the vault; -KeyVaultName on
+# its own just wires the env var to an existing (out-of-band) vault.
+$deployKv = [bool]$DeployKeyVault
+$deployArgs += @(
+    "deployKeyVault=$($deployKv.ToString().ToLower())",
+    "keyVaultName=$KeyVaultName",
+    "accessGroupId=$AccessGroupId",
+    "adminGroupId=$AdminGroupId"
+)
+if ($deployKv -and -not $KeyVaultName) { throw 'Provide -KeyVaultName when -DeployKeyVault is set.' }
+if (-not $AdminGroupId) {
+    Write-Warning 'No -AdminGroupId supplied. With v12 enforcement live, the seeded store will have no admin gate; unless the store already contains an admin/assignment, every operator will be 403''d. Continue only if you know the store is pre-seeded.'
+}
+$deployArgs += @('--query','properties.outputs.appFqdn.value','-o','tsv')
 $Fqdn = Invoke-Az $deployArgs
 if ($WhatIfPreference) { $Fqdn = '<app>.<region>.azurecontainerapps.io' }
 Write-Host "  App FQDN: $Fqdn" -ForegroundColor Green

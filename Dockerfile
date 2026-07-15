@@ -95,6 +95,8 @@ RUN npm ci --omit=dev
 # them must be present in the image (the pre-v11 Dockerfile copied only
 # server.js + public/, which no longer boots after the module split).
 COPY server.js reports.js packs.js snapshots.js audit.js ./
+# v12 RBAC modules — server.js require()s these, so they MUST be in the image.
+COPY auth.js rbac.js tenants.js keyvault.js ./
 COPY scripts/ ./scripts/
 COPY public/ ./public/
 COPY config.json.example ./

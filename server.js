@@ -31,14 +31,20 @@ const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 const fs = require("fs");
 const os = require("os");
-const { REPORTS, findReport, buildCommand } = require("./reports.js");
+const { REPORTS, findReport, buildCommand, allAreas } = require("./reports.js");
 const { saveSnapshot, listSnapshots, loadSnapshot, deleteSnapshot, diffRows } = require("./snapshots.js");
-const { audit, readAudit, setIdentityProvider } = require("./audit.js");
+const { audit, readAudit, setConnectionIdentityProvider } = require("./audit.js");
 const { PACKS, findPack } = require("./packs.js");
+const { userMiddleware } = require("./auth.js");
+const rbac = require("./rbac.js");
+const tenants = require("./tenants.js");
 
 const app = express();
 const PORT = process.env.PORT || 3365;
 const DOCKER_MODE = !!process.env.DOCKER_MODE;
+// v12 RBAC Phase 4: when set, per-tenant app-only certificate auth is used for
+// tenants that carry cert config (clientId + certSecret). Unset => device-code.
+const KEY_VAULT_NAME = process.env.KEY_VAULT_NAME || null;
 // SECURITY: localhost-only by default. The UI drives a PowerShell session
 // that may hold an authenticated Graph token — never expose it to the LAN
 // unless explicitly requested (Docker needs 0.0.0.0 inside the container).
@@ -56,6 +62,9 @@ try {
   }
 } catch (e) { console.error("  config.json invalid:", e.message); }
 app.use(express.json({ limit: "2mb" }));
+// v12 RBAC Phase 1: resolve the acting user (Easy Auth) onto req.user for every
+// request. AuthN only — no access enforcement here (that is Phase 3).
+app.use(userMiddleware);
 
 // ── Persistent data directory ────────────────────────────────────────
 // All durable state (snapshots, audit log, console logs, CSV exports) lives
@@ -65,6 +74,10 @@ app.use(express.json({ limit: "2mb" }));
 // TEMP_DIR (below) is deliberately NOT under DATA_DIR — it is ephemeral IPC
 // scratch and belongs on fast local/ephemeral storage.
 const DATA_DIR = process.env.DATA_DIR || process.cwd();
+
+// v12 RBAC: initialize the authorization store (seeds from config.json tenants
+// on first run). Guards below read it via rbac.getStore().
+try { rbac.initStore(CONFIG.tenants); } catch (e) { console.error("  RBAC store init failed:", e.message); }
 
 // ── Temp directory ──────────────────────────────────────────────────
 const TEMP_DIR = path.join(os.tmpdir(), "m365-admin-reports");
@@ -204,7 +217,7 @@ let connectionInfo = { graphConnected: false, exchangeConnected: false, account:
 // Most recent device-code prompt ({ url, code, at }), surfaced to the client
 // during a device-code connect. Null when none is pending.
 let deviceCode = null;
-setIdentityProvider(() => connectionInfo.account || null);
+setConnectionIdentityProvider(() => connectionInfo.account || null);
 let entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } };
 
 // ── Job queue ─────────────────────────────────────────────────────────
@@ -427,6 +440,54 @@ function isSafe(cmd) {
 //  API
 // ══════════════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════════════
+//  v12 RBAC — access + authorization guards (Phase 3)
+//
+//  Layers: (1) an access gate on all /api/* (except health) requires an
+//  authenticated caller who may use the tool; (2) per-route tenant/report
+//  guards; (3) admin-only routes. Every DENY is audited (allows are covered by
+//  each action's own audit call). Localhost dev is a full admin (see auth.js),
+//  so local behavior is unchanged.
+// ══════════════════════════════════════════════════════════════════════
+function denyAudit(req, res, code, reason, extra = {}) {
+  audit(req, "authz.deny", { reason, path: req.originalUrl, ...extra });
+  return res.status(code).json({ error: reason });
+}
+
+// Map the currently connected Entra tenant to a store tenant slug (or null).
+function connectedTenantSlug() {
+  const tid = connectionInfo.tenantId;
+  if (!tid) return null;
+  const t = (rbac.getStore().tenants || []).find(x => x.tenantId === tid || x.id === tid);
+  return t ? t.id : null;
+}
+
+// Overall access gate — mounted on /api, skips the unauthenticated health probe.
+app.use("/api", (req, res, next) => {
+  if (req.path === "/health") return next();
+  let store;
+  try { store = rbac.getStore(); } catch (e) { return res.status(500).json({ error: "Authorization store unavailable" }); }
+  const u = req.user;
+  if (!u || !u.upn) return denyAudit(req, res, 401, "Not authenticated");
+  if (!rbac.hasToolAccess(u, store)) return denyAudit(req, res, 403, "Not authorized to use this tool");
+  next();
+});
+
+// Report guard (report-only): reportId from body or route params.
+function guardReport(req, res, next) {
+  const reportId = (req.body && req.body.reportId) || req.params.reportId || null;
+  if (!reportId) return next(); // missing-id shape errors are handled by the route
+  if (!rbac.can(req.user, { reportId }, rbac.getStore()))
+    return denyAudit(req, res, 403, "Not authorized for this report", { reportId });
+  next();
+}
+
+// Admin-only guard.
+function requireAdmin(req, res, next) {
+  if (!rbac.isAdmin(req.user, rbac.getStore())) return denyAudit(req, res, 403, "Admin only");
+  next();
+}
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", version: VERSION, ...connectionInfo, sessionAlive: psAlive, dockerMode: DOCKER_MODE, ps: { exe: detectedPS.exe, version: detectedPS.version, graphModule: detectedPS.graphModule, graphUsersModule: detectedPS.graphUsersModule, exoModule: detectedPS.exoModule, ready: detectedPS.ready, probing: detectedPS.probing, error: detectedPS.probeError }, platform: os.platform() });
 });
@@ -451,6 +512,56 @@ app.post("/api/install-graph", (req, res) => {
 // ── Connect Graph (interactive browser OR device code) ──────────────
 app.post("/api/connect/graph", (req, res) => {
   const { account, tenantId, useDeviceCode } = req.body || {};
+  // Tenant guard: a non-admin may only connect to a tenant they are granted.
+  if (!rbac.isAdmin(req.user, rbac.getStore())) {
+    const allowed = rbac.allowedTenants(req.user, rbac.getStore());
+    if (tenantId && tenantId.trim()) {
+      if (!allowed.find(t => t.tenantId === tenantId || t.id === tenantId))
+        return denyAudit(req, res, 403, "Not authorized for this tenant", { tenantId });
+    } else if (allowed.length === 0) {
+      return denyAudit(req, res, 403, "No tenant access");
+    }
+  }
+  // ── App-only (certificate) path ──────────────────────────────────
+  // Preferred when Key Vault is wired and the selected tenant carries cert
+  // config, UNLESS the caller explicitly asked for device code (admin bootstrap).
+  // Falls back to the interactive/device path below otherwise. (Phase 4a: single
+  // session; the concurrent per-tenant pool is Phase 4b.)
+  if (KEY_VAULT_NAME && !useDeviceCode) {
+    const store = rbac.getStore();
+    const appTenant = tenants.tenantBySlug(store, req.body && req.body.tenant)
+      || (tenantId ? (store.tenants || []).find(t => t.tenantId === tenantId || t.id === tenantId) : null);
+    if (tenants.isAppOnlyConfigured(appTenant)) {
+      const jobId = uuidv4();
+      // Pre-register the job so a fast poll doesn't 404 while the cert stages.
+      jobs.set(jobId, { status: "running", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null });
+      deviceCode = null;
+      log(`CONNECT GRAPH (app-only): tenant=${appTenant.id}`);
+      audit(req, "connect.graph", { tenant: appTenant.id, mode: "app-only" });
+      (async () => {
+        try {
+          const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
+          const cmd = tenants.buildGraphAppOnlyConnect(appTenant, cert.path);
+          runInSession(cmd, jobId, { timeout: 120000 });
+          const iv = setInterval(() => {
+            const j = jobs.get(jobId);
+            if (j && j.status !== "running" && j.status !== "queued") {
+              clearInterval(iv);
+              if (j.output && j.output.trim()) {
+                const raw = j.output.trim(); const s = raw.indexOf("{"), e = raw.lastIndexOf("}");
+                if (s !== -1 && e !== -1) { try { const d = JSON.parse(raw.substring(s, e + 1)); connectionInfo.graphConnected = true; connectionInfo.account = d.Account || appTenant.clientId; connectionInfo.tenantId = d.TenantId || appTenant.tenantId; log(`CONNECTED (app-only) as ${connectionInfo.account}`); } catch {} }
+              }
+            }
+          }, 500);
+        } catch (e) {
+          log(`APP-ONLY connect failed: ${e.message}`);
+          jobs.set(jobId, { status: "error", output: "", error: `App-only connect failed: ${e.message}`, info: "", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+        }
+      })();
+      return res.json({ jobId });
+    }
+  }
+
   const useDevCode = useDeviceCode || DOCKER_MODE;
   deviceCode = null; // clear any stale prompt from a prior attempt
   log(`CONNECT GRAPH: account=${account || '(none)'} tenant=${tenantId || '(none)'} deviceCode=${useDevCode}`);
@@ -491,6 +602,30 @@ app.post("/api/connect/graph", (req, res) => {
 // ── Connect Exchange ────────────────────────────────────────────────
 app.post("/api/connect/exchange", (req, res) => {
   const { account } = req.body || {};
+  // App-only (certificate) path — used when the connected/selected tenant has
+  // cert config and Key Vault is wired. Falls back to interactive/device below.
+  if (KEY_VAULT_NAME) {
+    const store = rbac.getStore();
+    const appTenant = tenants.tenantBySlug(store, req.body && req.body.tenant)
+      || (connectionInfo.tenantId ? (store.tenants || []).find(t => t.tenantId === connectionInfo.tenantId || t.id === connectionInfo.tenantId) : null);
+    if (tenants.isAppOnlyConfigured(appTenant)) {
+      const jobId = uuidv4();
+      jobs.set(jobId, { status: "running", output: "", error: "", info: "", startedAt: new Date().toISOString(), completedAt: null });
+      audit(req, "connect.exchange", { tenant: appTenant.id, mode: "app-only" });
+      (async () => {
+        try {
+          const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
+          const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, req.body && req.body.org);
+          runInSession(cmd, jobId, { timeout: 120000 });
+          const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output && j.output.trim()) connectionInfo.exchangeConnected = true; } }, 500);
+        } catch (e) {
+          log(`APP-ONLY exchange connect failed: ${e.message}`);
+          jobs.set(jobId, { status: "error", output: "", error: `App-only Exchange connect failed: ${e.message}`, info: "", startedAt: new Date().toISOString(), completedAt: new Date().toISOString() });
+        }
+      })();
+      return res.json({ jobId });
+    }
+  }
   const useDevCode = DOCKER_MODE;
   const upn = account ? account.replace(/[`$"'{}();&|]/g, "") : "";
   deviceCode = null; // clear any stale prompt from a prior attempt
@@ -555,7 +690,15 @@ app.get("/api/browse/licenses", (req, res) => {
 app.post("/api/browse/refresh", (req, res) => { entityCache = { users: { data: null, at: null }, groups: { data: null, at: null }, licenses: { data: null, at: null } }; res.json({ ok: true }); });
 
 // ── Report catalog (server-owned; client renders from this) ─────────
-app.get("/api/reports", (req, res) => { res.json(REPORTS); });
+app.get("/api/reports", (req, res) => {
+  const store = rbac.getStore();
+  if (rbac.isAdmin(req.user, store)) return res.json(REPORTS);
+  // Return only the areas/reports the caller may run; drop empty categories.
+  const filtered = REPORTS
+    .map(c => ({ ...c, items: c.items.filter(it => rbac.can(req.user, { reportId: it.id }, store)) }))
+    .filter(c => c.items.length);
+  res.json(filtered);
+});
 
 // ── Run report by ID ────────────────────────────────────────────────
 // The client sends { reportId, params, fields } — never raw PowerShell.
@@ -567,6 +710,9 @@ app.post("/api/run", (req, res) => {
   if (!reportId) return res.status(400).json({ error: "No reportId" });
   const report = findReport(reportId);
   if (!report) return res.status(404).json({ error: `Unknown report: ${reportId}` });
+  // Authorization: the report must be allowed for the caller in the connected tenant.
+  if (!rbac.can(req.user, { tenant: connectedTenantSlug(), reportId }, rbac.getStore()))
+    return denyAudit(req, res, 403, "Not authorized for this report", { reportId });
   const cmd = buildCommand(report, fields, params);
   const c = isSafe(cmd);
   if (!c.ok) { log(`RUN ${reportId} REJECTED: ${c.why}`); audit(req, "report.rejected", { reportId, why: c.why }); return res.status(403).json({ error: c.why }); }
@@ -602,7 +748,7 @@ app.post("/api/export", (req, res) => {
 // ── Snapshots & diff ────────────────────────────────────────────────
 // Point-in-time copies of report results, stored under ./M365Snapshots.
 // Diff answers "what changed since <snapshot>" — the audit primitive.
-app.post("/api/snapshots", (req, res) => {
+app.post("/api/snapshots", guardReport, (req, res) => {
   const { reportId, rows, label, params, fields } = req.body || {};
   if (!reportId || !findReport(reportId)) return res.status(400).json({ error: "Unknown reportId" });
   if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: "No rows to snapshot" });
@@ -611,25 +757,25 @@ app.post("/api/snapshots", (req, res) => {
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.get("/api/snapshots/:reportId", (req, res) => {
+app.get("/api/snapshots/:reportId", guardReport, (req, res) => {
   if (!findReport(req.params.reportId)) return res.status(400).json({ error: "Unknown reportId" });
   res.json(listSnapshots(req.params.reportId));
 });
 
-app.get("/api/snapshots/:reportId/:id", (req, res) => {
+app.get("/api/snapshots/:reportId/:id", guardReport, (req, res) => {
   const s = loadSnapshot(req.params.reportId, req.params.id);
   if (!s) return res.status(404).json({ error: "Snapshot not found" });
   res.json(s);
 });
 
-app.delete("/api/snapshots/:reportId/:id", (req, res) => {
+app.delete("/api/snapshots/:reportId/:id", guardReport, (req, res) => {
   audit(req, "snapshot.delete", { reportId: req.params.reportId, id: req.params.id });
   res.json({ deleted: deleteSnapshot(req.params.reportId, req.params.id) });
 });
 
 // Diff a snapshot (fromId) against either current rows (toRows) or a second
 // snapshot (toId). Direction: from = older baseline, to = newer state.
-app.post("/api/diff", (req, res) => {
+app.post("/api/diff", guardReport, (req, res) => {
   const { reportId, fromId, toId, toRows } = req.body || {};
   if (!reportId || !findReport(reportId)) return res.status(400).json({ error: "Unknown reportId" });
   const from = loadSnapshot(reportId, fromId);
@@ -711,6 +857,11 @@ app.post("/api/pack/run", (req, res) => {
   const pack = findPack(packId);
   if (!pack) return res.status(404).json({ error: `Unknown pack: ${packId}` });
   if (!connectionInfo.graphConnected) return res.status(409).json({ error: "Connect to Graph before running a pack" });
+  // Authorization: every report in the pack must be allowed for the caller.
+  const tenantSlug = connectedTenantSlug();
+  const store = rbac.getStore();
+  const denied = pack.reports.filter(rid => !rbac.can(req.user, { tenant: tenantSlug, reportId: rid }, store));
+  if (denied.length) return denyAudit(req, res, 403, "Not authorized for one or more reports in this pack", { packId, denied });
   const cleanLabel = label ? String(label).slice(0, 120) : "";
   audit(req, "pack.run", { packId, snapshot: !!snapshot, label: cleanLabel || null });
   const packJob = {
@@ -790,10 +941,171 @@ app.get("/api/dashboard", async (req, res) => {
 });
 
 // ── Config & audit ──────────────────────────────────────────────────
-app.get("/api/config", (req, res) => { res.json({ tenants: CONFIG.tenants || [] }); });
-app.get("/api/audit", (req, res) => {
+app.get("/api/config", (req, res) => {
+  const store = rbac.getStore();
+  // Only the tenants the caller may reach (friendly-name dropdown source).
+  const tenants = rbac.allowedTenants(req.user, store)
+    .map(t => ({ id: t.id, name: t.name, tenantId: t.tenantId }));
+  // admin flag drives whether the client renders the admin (access-control) UI;
+  // every admin route is independently server-gated by requireAdmin regardless.
+  res.json({ tenants, admin: rbac.isAdmin(req.user, store) });
+});
+app.get("/api/audit", requireAdmin, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
   res.json({ entries: readAudit(limit) });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+//  v12 RBAC Phase 5 — admin management API (admin-gated CRUD over the store)
+//
+//  Every route below is guarded by requireAdmin and writes through
+//  rbac.saveStore (atomic temp-file + rename). Mutations clone the cached
+//  store so the in-memory cache is never edited in place; the mtime-cache in
+//  rbac.js reloads the fresh copy on the next read, so edits take effect live.
+//  Writes are serialized by Node's single-threaded event loop + the atomic
+//  rename; the single-admin-writer assumption from Phase 2 still holds.
+// ══════════════════════════════════════════════════════════════════════
+
+// The report catalog the role editor needs: areas, each with its report ids.
+function adminCatalog() {
+  return REPORTS.map(c => ({ area: c.category, items: c.items.map(i => ({ id: i.id, name: i.name })) }));
+}
+
+// Derive a stable slug (mirrors rbac.js's internal slug()).
+const adminSlug = (s) => (s ? String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") : "");
+
+// Load → clone → mutate → save, with uniform error handling. `fn(next)` mutates
+// the clone and returns the response payload (or throws a message for a 400).
+function mutateStore(req, res, action, fn) {
+  let store;
+  try { store = rbac.getStore(); } catch (e) { return res.status(500).json({ error: `Store unavailable: ${e.message}` }); }
+  const next = JSON.parse(JSON.stringify(store));
+  let payload;
+  try { payload = fn(next); } catch (e) { return res.status(400).json({ error: e.message }); }
+  try { rbac.saveStore(next); } catch (e) { return res.status(500).json({ error: `Save failed: ${e.message}` }); }
+  audit(req, action, payload && payload.__audit ? payload.__audit : {});
+  if (payload && payload.__audit) delete payload.__audit;
+  return res.json(payload || { ok: true });
+}
+
+// Normalize a role's tenant scope: "*" (all) or an array of tenant slugs.
+function normTenants(t) {
+  if (t === "*") return "*";
+  return Array.isArray(t) ? [...new Set(t.map(String).filter(Boolean))] : [];
+}
+// Normalize a role's report scope: "*" (all) or { areas: "*"|[], ids: [] }.
+function normReports(r) {
+  if (r === "*" || (r && r.areas === "*")) return "*";
+  if (r && typeof r === "object") {
+    return {
+      areas: Array.isArray(r.areas) ? [...new Set(r.areas.map(String).filter(Boolean))] : [],
+      ids: Array.isArray(r.ids) ? [...new Set(r.ids.map(String).filter(Boolean))] : [],
+    };
+  }
+  return { areas: [], ids: [] }; // default-deny: no explicit grant → nothing
+}
+
+// Full authZ model + the catalog metadata the role editor renders from.
+app.get("/api/admin/store", requireAdmin, (req, res) => {
+  const s = rbac.getStore();
+  res.json({
+    accessGroupId: s.accessGroupId || "",
+    adminGroupId: s.adminGroupId || "",
+    tenants: s.tenants || [],
+    roles: s.roles || [],
+    assignments: s.assignments || [],
+    catalog: adminCatalog(),
+    areas: allAreas(),
+  });
+});
+
+// ── Tenants ───────────────────────────────────────────────────────────
+app.post("/api/admin/tenants", requireAdmin, (req, res) => {
+  const { id, name, tenantId, clientId, certSecret } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: "Tenant name is required" });
+  mutateStore(req, res, "admin.tenant.save", (s) => {
+    const sid = (id && String(id).trim()) || adminSlug(name);
+    if (!sid) throw new Error("Could not derive a tenant id from the name");
+    const entry = {
+      id: sid, name: String(name).trim(),
+      tenantId: (tenantId && String(tenantId).trim()) || null,
+      clientId: (clientId && String(clientId).trim()) || null,
+      certSecret: (certSecret && String(certSecret).trim()) || null,
+    };
+    const i = s.tenants.findIndex(t => t.id === sid);
+    if (i >= 0) s.tenants[i] = entry; else s.tenants.push(entry);
+    // Return a copy (not the stored object) so the audit marker never persists.
+    return { ...entry, __audit: { id: sid, updated: i >= 0 } };
+  });
+});
+
+app.delete("/api/admin/tenants/:id", requireAdmin, (req, res) => {
+  mutateStore(req, res, "admin.tenant.delete", (s) => {
+    const id = req.params.id;
+    s.tenants = (s.tenants || []).filter(t => t.id !== id);
+    // Scrub the deleted tenant from any role that scoped to it.
+    for (const r of s.roles || []) if (Array.isArray(r.tenants)) r.tenants = r.tenants.filter(t => t !== id);
+    return { ok: true, id, __audit: { id } };
+  });
+});
+
+// ── Roles ─────────────────────────────────────────────────────────────
+app.post("/api/admin/roles", requireAdmin, (req, res) => {
+  const { id, name, tenants: rt, reports } = req.body || {};
+  if (!name || !String(name).trim()) return res.status(400).json({ error: "Role name is required" });
+  mutateStore(req, res, "admin.role.save", (s) => {
+    const sid = (id && String(id).trim()) || adminSlug(name);
+    if (!sid) throw new Error("Could not derive a role id from the name");
+    const entry = { id: sid, name: String(name).trim(), tenants: normTenants(rt), reports: normReports(reports) };
+    const i = s.roles.findIndex(r => r.id === sid);
+    if (i >= 0) s.roles[i] = entry; else s.roles.push(entry);
+    return { ...entry, __audit: { id: sid, updated: i >= 0 } };
+  });
+});
+
+app.delete("/api/admin/roles/:id", requireAdmin, (req, res) => {
+  mutateStore(req, res, "admin.role.delete", (s) => {
+    const id = req.params.id;
+    s.roles = (s.roles || []).filter(r => r.id !== id);
+    // Scrub the deleted role from every assignment that granted it.
+    for (const a of s.assignments || []) if (Array.isArray(a.roles)) a.roles = a.roles.filter(x => x !== id);
+    return { ok: true, id, __audit: { id } };
+  });
+});
+
+// ── Assignments (user/group → roles) ──────────────────────────────────
+app.post("/api/admin/assignments", requireAdmin, (req, res) => {
+  const { principalType, principal, roles } = req.body || {};
+  if (principalType !== "user" && principalType !== "group")
+    return res.status(400).json({ error: "principalType must be 'user' or 'group'" });
+  if (!principal || !String(principal).trim()) return res.status(400).json({ error: "A principal (UPN or group object id) is required" });
+  mutateStore(req, res, "admin.assignment.save", (s) => {
+    const p = String(principal).trim();
+    const entry = { principalType, principal: p, roles: Array.isArray(roles) ? [...new Set(roles.map(String).filter(Boolean))] : [] };
+    const i = (s.assignments || []).findIndex(a => a.principalType === principalType && String(a.principal).toLowerCase() === p.toLowerCase());
+    if (i >= 0) s.assignments[i] = entry; else s.assignments.push(entry);
+    return { ...entry, __audit: { principalType, principal: p, roles: entry.roles, updated: i >= 0 } };
+  });
+});
+
+app.delete("/api/admin/assignments/:principalType/:principal", requireAdmin, (req, res) => {
+  mutateStore(req, res, "admin.assignment.delete", (s) => {
+    const pt = req.params.principalType;
+    const p = decodeURIComponent(req.params.principal).toLowerCase();
+    s.assignments = (s.assignments || []).filter(a => !(a.principalType === pt && String(a.principal).toLowerCase() === p));
+    return { ok: true, __audit: { principalType: pt, principal: p } };
+  });
+});
+
+// ── Bootstrap group ids (overall-access gate + admin bootstrap) ───────
+app.put("/api/admin/groups", requireAdmin, (req, res) => {
+  const { accessGroupId, adminGroupId } = req.body || {};
+  const clean = (v) => (v && String(v).trim() ? String(v).trim() : null);
+  mutateStore(req, res, "admin.groups.save", (s) => {
+    s.accessGroupId = clean(accessGroupId);
+    s.adminGroupId = clean(adminGroupId);
+    return { accessGroupId: s.accessGroupId, adminGroupId: s.adminGroupId, __audit: { accessGroupId: s.accessGroupId, adminGroupId: s.adminGroupId } };
+  });
 });
 
 // ── Static ──────────────────────────────────────────────────────────

@@ -256,6 +256,15 @@ function findReport(id) {
   return null;
 }
 
+// reportId -> area (category) index, for the v12 RBAC report/area allowlist.
+const REPORT_AREA = Object.fromEntries(
+  REPORTS.flatMap(c => c.items.map(i => [i.id, c.category]))
+);
+// The area (category) a report belongs to, or null if the id is unknown.
+function reportArea(id) { return REPORT_AREA[id] || null; }
+// All defined area names (categories).
+function allAreas() { return REPORTS.map(c => c.category); }
+
 // ── Command construction (server-side only) ──────────────────────────
 // Strips PowerShell metacharacters from user-supplied parameter values.
 const PARAM_STRIP = /[`$"'{}();&|<>\\]/g;
@@ -281,4 +290,4 @@ function buildCommand(report, fields, params) {
   return cmd;
 }
 
-module.exports = { REPORTS, findReport, buildCommand };
+module.exports = { REPORTS, findReport, buildCommand, reportArea, allAreas, REPORT_AREA };

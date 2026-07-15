@@ -70,6 +70,12 @@ param deployKeyVault bool = false
 @description('v12 RBAC: Key Vault name for per-tenant app-only certificates. Required when deployKeyVault is true.')
 param keyVaultName string = ''
 
+@description('v12 RBAC: Entra access-group object id (overall-access gate). Seeded into the store on first run. LEAVING THIS AND accessGroupId EMPTY on a fresh store 403s every non-local caller — populate an admin/assignment first.')
+param accessGroupId string = ''
+
+@description('v12 RBAC: Entra admin-group object id. Members receive the in-tool admin role (first-admin bootstrap).')
+param adminGroupId string = ''
+
 var storageLinkName = 'm365data'
 var dataMountPath = '/app/data'
 // Built-in role: Key Vault Secrets User (read secret contents).
@@ -165,6 +171,11 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             // v12 RBAC: name of the Key Vault holding per-tenant app-only certs.
             // Empty until deployKeyVault is enabled; the app reads it only then.
             { name: 'KEY_VAULT_NAME', value: keyVaultName }
+            // v12 RBAC bootstrap group ids. These seed the store's access/admin
+            // gates on first run — set them (and populate an admin/assignment)
+            // BEFORE enforcement goes live, or every operator is 403'd.
+            { name: 'ACCESS_GROUP_ID', value: accessGroupId }
+            { name: 'ADMIN_GROUP_ID', value: adminGroupId }
           ]
           volumeMounts: [
             { volumeName: 'data', mountPath: dataMountPath }
