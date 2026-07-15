@@ -5,6 +5,61 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-15 -- ADR-0010: v12.1.3 — hosted connect card is app-only; Dockerfile COPY glob + guard; RBAC store repoint (second-user fix)
+**Context:** With Phase 4b live, a second user (dave@am.consulting) still could
+not connect — the deployed connect card presented the delegated sign-in controls
+(UPN, Tenant ID, device-code, "Connect as Current User"), which the server refuses
+in `DOCKER_MODE`, and his Connect dead-ended in "No job was created — the server
+rejected the request." Ground-truth diagnosis (live RBAC store + audit log + Entra
+membership via `az`) showed the real cause was **data, not code**: the store's
+`am-full-read` role assignment was bound to the **"M365 Admin Reports - Access"**
+group (`197dd092`, which Dave is not in) instead of the **"AM Full Read"** group
+(`8c763eb0`, which he is). Dave's token carried none of the store's referenced
+groups → `hasToolAccess` = false → denied at the access gate before any tenant
+logic. The role being *named* `am-full-read` while assigned to the *Access* group
+was the trap; it was not group-claim overage (Dave is in ~30 groups, well under
+the ~150/200 cutoff). Separately, the connect card and the Dockerfile were the two
+deferred follow-ups from ADR-0009.
+**Decision:**
+- **Fix the live data out-of-band, unblock without a deploy.** Repointed the
+  assignment `197dd092` → `8c763eb0` directly on the Azure Files store
+  (`access/rbac.json`), original backed up to `access/rbac.json.bak-20260715-repoint`.
+  `rbac.js` hot-reloads on file mtime, so the fix took effect on Dave's next
+  request — no image change required. Verified: **Dave refreshed and connected.**
+  `hasToolAccess` grants entry to any role-holder, so binding the role to the
+  correct group also satisfies the access gate even though the Access group is
+  empty; `accessGroupId` was left pointing at the (empty) Access group as the
+  future gate.
+- **Connect card is app-only in the hosted tool** (`public/index.html`). In
+  `DOCKER_MODE` (read from `/api/health` `dockerMode`), hide the delegated-only
+  controls and show only the tenant selector + Connect (disabled until a tenant is
+  chosen); the connecting banner no longer promises a browser sign-in window.
+  Localhost keeps the delegated fallback. Added a clear **"No access — ask an
+  admin"** banner when the RBAC gate denies `/api/config`, and a "no tenant
+  granted" note — so this whole class of denial is self-explanatory instead of a
+  dead Connect button.
+- **Retire the explicit Dockerfile COPY list** (supersedes the ADR-0007 approach
+  of "keep the explicit list in sync"). Use `COPY *.js ./` so a new top-level
+  module can never be silently omitted, and add `npm run lint:copy`
+  (`scripts/lint-copy.js`) that walks the `server.js` require() graph and fails the
+  build if any `require("./x")` is unresolved or uncopied. (The guard itself had a
+  shared-global-regex-under-recursion bug that dropped `keyvault.js`; fixed by
+  collecting matches before recursing.)
+- **Deploy by quick image roll**, not the full script: `az acr build --no-logs` +
+  `az containerapp update --image`, preserving Easy Auth / KV / storage config.
+**Consequences:** Ships as **v12.1.3**, live in ACA (rev `--0000007`, eastus2,
+100% traffic). The credential-bleed remediation is now proven end-to-end by a real
+second user. The COPY glob is validated in the strongest way possible — the 12.1.3
+image booted **Healthy**, so the crash-loop mode that killed 12.1.0/12.1.1 cannot
+recur from an omitted module. `npm test` 22/22; both lints green. Both v12 PRs
+(#1 Phase 4b, #2 this work) are merged; `main` @ `34217d5` equals what is live.
+Operational lesson recorded: an RBAC role/assignment must reference the intended
+Entra **group OID** — a role whose *name* matches a group is not the same as being
+*assigned to* that group; verify the OID, not the name. `gh` also needed the
+`am-jcsernik` account added (the `arcenik86` login is not a collaborator on
+`origin`, so it could not open PRs). Open: Exchange app-only unproven; group-claim
+overage fallback still unbuilt; switch-tenant-after-connect still needs a disconnect.
+
 ## 2026-07-15 -- ADR-0009: v12 Phase 4b — per-tenant app-only session pool (credential-bleed fix), shipped v12.1.2
 **Context:** A second user testing the deployed tool saw it "connected as" the
 admin, and their reports executed against the admin's delegated Graph token. Root
