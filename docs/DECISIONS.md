@@ -5,6 +5,51 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-15 -- ADR-0009: v12 Phase 4b — per-tenant app-only session pool (credential-bleed fix), shipped v12.1.2
+**Context:** A second user testing the deployed tool saw it "connected as" the
+admin, and their reports executed against the admin's delegated Graph token. Root
+cause (confirmed in code): v11's architecture is process-global — one `pwsh`
+process, one `connectionInfo`, one FIFO queue — and the live connection was a
+**delegated device-code** session, so the admin's personal token sat in front of
+every caller. This is the deferred Phase 4b, now forced by a live exposure.
+**Decision:**
+- **Connection model = app-only per tenant** (the ADR-0006 intent), chosen over
+  per-user delegated sessions. Rationale weighed with the operator: app-only makes
+  the connection identity the app SP (never a person), is unattended, reuses the
+  Phase 0 cert infra, and is cheap (bounded by #tenants). The cost — the M365
+  unified log attributes actions to the app SP — is covered by hardening the
+  tool's **own** audit log as the authoritative "who".
+- **Per-tenant session pool** (`sessions.js`): each tenant slug gets its own pwsh,
+  connection state, FIFO queue, and browse/dashboard caches (the latter moved
+  off globals to avoid a *new* cross-tenant cache bleed). Lazy start; 30-min idle
+  eviction (kills pwsh, unlinks staged cert). Concurrency is across tenants; within
+  a tenant, commands still serialize (no-interleave invariant preserved).
+- **App-only mandatory in `DOCKER_MODE`:** delegated/device-code connect refused
+  (400). Delegated survives only as the localhost-dev fallback. This is the change
+  that structurally removes the bleed — no personal token is ever server-side.
+- **Tenant routed per request**, re-checked with `rbac.can(user,{tenant})`
+  server-side (never trust the client's tenant choice). New `GET /api/connection`;
+  `/api/health` slimmed to liveness + PS state.
+- **Tamper-evident audit** — hash chain (`hash = sha256(prevHash + entry)`),
+  `verifyAuditChain()`, `integrity` on `GET /api/audit`.
+- **`maxReplicas` stays 1** — sessions are per-replica in memory; lifting it needs
+  ACA session affinity (deferred).
+**Consequences:** Ships as **v12.1.0** (feature), with two follow-on patches found
+only at first live exercise: **v12.1.1** (`a6b47d3`) — the Dockerfile `COPY` list
+omitted the new `sessions.js`, crash-looping the image (a *recurrence* of the
+ADR-0007 hazard: the explicit COPY list must track every `require`); **v12.1.2**
+(`60bc80c`) — the app-only connect commands write via the `__OUTFILE__` token
+(substituted only in `raw` mode) but ran without `raw: true`, so a *successful*
+`Connect-MgGraph -Certificate` produced no captured output and the server never
+set `graphConnected`. Both were invisible until app-only ran live (it never had,
+through Phase 4a). v12.1.2 is live in ACA (rev `--0000006`, eastus2) and the
+app-only path is **confirmed end-to-end** — the connect banner reads the app
+identity, not a user. Deploy friction of note: the background deploy's output was
+truncated by task teardown across turns (build/Bicep still completed; trust live
+Azure state over the log), and `az containerapp update --image` is the quick
+image roll. Open: connect-card UI still shows vestigial delegated controls;
+Dockerfile COPY hardening; second-user validation; merge to `main`.
+
 ## 2026-07-15 -- ADR-0008: v12.0.0 shipped and deployed; two Entra lockout prerequisites resolved at deploy
 **Context:** Phases 5 (admin UI + `/api/admin/*` CRUD) and 6 (guard-matrix
 integration tests, docs, version bump, deploy) completed v12. Deploying turns
