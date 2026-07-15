@@ -59,8 +59,9 @@ roles/assignments via the admin UI and validate the live app-only connect.
   group id (now enabled).
 
 ## Verify next (interactive — needs a real sign-in)
-1. Sign in at the URL as **jcsernik-adm@am.consulting** → confirm the
-   **Access Control** panel appears (proves group-claim admin works end-to-end).
+1. [x] **DONE (session 4):** signed in as **jcsernik-adm@am.consulting** at the
+   live URL and the **Access Control** panel appears — group-claim admin works
+   end-to-end in production. v12 authZ validated live.
 2. In the panel, define tenant cert config for AM (clientId + `kv:m365-report-am`),
    create roles, and assign users/groups. Add members to the **access group**
    (still empty) or grant per-user roles.
