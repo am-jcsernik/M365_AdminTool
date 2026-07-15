@@ -1,60 +1,77 @@
 # Project State
-_Last updated: 2026-07-14 -- session 2_
+_Last updated: 2026-07-14 -- session 3_
 
 ## Current goal
-Ship the M365 Admin Reports app to Azure Container Apps. **Live deploy is now
-done and verified** (eastus2). Next is deciding the follow-on roadmap (app-only
-cert auth, v12 RBAC) or operational hardening.
+Build **v12 multi-user RBAC** (three access tiers: who may use the tool → which
+tenants → which reports/areas), plus per-tenant app-only certificate auth. Design
+is settled; Phases 0-4a are implemented and verified. Remaining: Phase 5 (admin
+UI), Phase 4b (concurrent pool + scale), Phase 6 (docs/release/deploy).
 
 ## Status
-- [x] (session 1) Promoted v11.11.0 source as tracked baseline; ACA enablement
-      (v11.12.0); device-code sign-in in-container (v11.12.1 Graph / v11.12.2
-      Exchange); local container validation.
-- [x] **Live ACA deploy performed and verified** (session 2). App v11.12.2 is live:
-      `https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io`
-- [x] Easy Auth gate verified: browser → 302 to am.consulting login; API → 401.
-- [x] **Jim connected inside the ACA instance** (device-code Graph/Exchange) — full
-      end-to-end confirmed.
-- [x] `deploy/Deploy-ToAca.ps1` hardened (see ADR-0005): `--no-logs`, exit-0 =
-      success, `-SkipBuild`, tolerant data-plane tag check.
-- [ ] In progress: nothing mid-flight.
+- [x] **Design settled** (session 3): reuse Easy Auth for identity; Entra security
+      group as the overall-access gate; in-tool named reusable roles scoping
+      tenants + areas/reports; first-admin via an Entra admin group; app-only cert
+      per tenant with certs in Key Vault (ACA managed identity). See ADR-0006 and
+      `RBAC-ROADMAP.md` / `docs/PLAN-v12-rbac.md`.
+- [x] **Phase 0 — infra provisioned & verified** (on `main`): Key Vault `amm365kv`,
+      system-assigned identity on the app + KV Secrets User, Entra access/admin
+      groups, per-tenant app-only app registration + KV cert, admin consent
+      (13/13 app roles). Script: `deploy/Provision-RbacPhase0.ps1`.
+- [x] **Phase 1 — AuthN plumbing** (`auth.js`): acting user from Easy Auth; dual
+      identity in audit. 15/15.
+- [x] **Phase 2 — authZ store + default-deny engine** (`rbac.js` + `reports.js`
+      area index). 23/23.
+- [x] **Phase 3 — route enforcement** (`server.js` guards). 19/19 (real-server).
+- [x] **Phase 4a — app-only cert connection** (`keyvault.js`, `tenants.js`) +
+      **Dockerfile COPY fix**. 20/20.
+- [ ] **Phase 4b (deferred)** — concurrent per-tenant connection pool + lift
+      `maxReplicas 1`. Needs live multi-tenant to validate.
+- [ ] **Phase 5** — admin UI in `public/index.html` (tenant/role/assignment
+      management + audit viewer; friendly-name tenant dropdown).
+- [ ] **Phase 6** — docs, integration tests, bump to **v12.0.0** + deploy.
 
 ## Active context
-- **Live infra (eastus2, RG `rg-m365admin`, sub "MCPP Subscription"
-  4c373777-…):** Container App `m365-admin-reports` (scale 0/1, Healthy), ACR
-  `amm365acr`, storage `amm365data` + Files share `m365data` (`DATA_DIR`),
-  Log Analytics `m365-admin-logs`.
-- **Easy Auth Entra app reg:** `edb8be95-fddd-4490-a851-ef32c828406f`
-  (display name "M365 Admin Reports (Easy Auth)"), issuer
-  `https://login.microsoftonline.com/am.consulting/v2.0`, redirect
-  `.../.auth/login/aad/callback`. Client secret was minted during deploy.
-- **Versions:** app deliverable **v11.12.2** (unchanged this session; app code
-  not touched). Deploy tooling changed — see `docs/CHANGELOG.md`.
-- **Cold start:** min-replicas 0 → operator re-runs the in-app device-code connect
-  on first request after idle. Durable state on the Files share survives.
-- **Watch device code:** `az containerapp logs show -g rg-m365admin
-  -n m365-admin-reports --follow`.
-- **Teardown if ever needed:** `az group delete --name rg-m365admin --yes` then
-  `az ad app delete --id edb8be95-fddd-4490-a851-ef32c828406f`.
-- **config.json** (tenant list) is gitignored; not uploaded to the share yet
-  (tenant picker optional).
+- **Branch:** all v12 *code* is on **`feature/v12-rbac`** (Phases 1-4a). Phase 0
+  infra tooling + design docs are on `main`. Remotes: `origin` (work,
+  am-jcsernik), `personal`.
+- **Phase 0 identifiers (for the RBAC store / env wiring):**
+  - Key Vault `amm365kv` (eastus2, RBAC-auth mode)
+  - App system-assigned identity principalId `0b7246b9-cd65-40d1-b399-32532e251aff`
+  - Access group `197dd092-df14-4052-ac0e-f1382f701b68`
+  - Admin group `bb661e80-e275-4e22-8a55-0615f5e7a4af`
+  - App-only app (client) ID `25407385-9354-471d-8532-6ea147a00f42`; SP objectId
+    `dea11da4-0294-4399-a983-75b54f83d946`
+  - Certificate `kv:m365-report-am` (expires 2027-07-15)
+- **Verification approach:** each phase has a throwaway harness (removed after
+  running); Phases 3/4a boot the real server and drive HTTP. The live cert-based
+  `Connect-MgGraph` is NOT locally verifiable (no MI / cert on the workstation) —
+  first real exercise is at deploy.
+- **RBAC store:** `DATA_DIR/access/rbac.json`, mtime-cached; seeds tenants from
+  `config.json` and group ids from env on first run; default-deny.
+- **Local dev is a full admin** (auth.js) so enforcement never locks out localhost.
+
+## Manual follow-ups still open (Phase 0)
+- Add members to the Entra **Access** and **Admin** groups.
+- **Exchange app-only:** assign the app SP (`dea11da4…`) an Exchange RBAC role
+  (e.g. View-Only Organization Management) in Exchange Online — manual EXO step.
 
 ## Next session should start by
-1. Deciding the follow-on: (a) **app-only certificate auth** (removes cold-start
-   re-auth + the max-1-replica cap — the planned successor to device-code), (b)
-   **v12 RBAC** for true multi-user authZ, or (c) operational polish (custom
-   domain, config.json upload, monitoring/alerts).
-2. If touching the deploy again: the local `*.azurecr.io` data-plane read failure
-   (`CONNECTIVITY_CHALLENGE_ERROR`) is still unresolved — fine for deploys, but
-   worth fixing before relying on local ACR content queries.
+1. **Phase 5 — admin UI** in `public/index.html`: tenant management (friendly
+   name, tenantId, clientId, `kv:` cert ref), role definitions (tenants +
+   areas/reports), user/group assignments, and the audit viewer — all admin-gated
+   in UI *and* already gated server-side. Add the admin CRUD API routes it needs
+   (guarded by `requireAdmin`), writing via `rbac.saveStore`.
+2. Then **Phase 6**: set the container env (`KEY_VAULT_NAME`, `ADMIN_GROUP_ID`,
+   `ACCESS_GROUP_ID`) — **without these + at least one admin, enabling
+   enforcement locks everyone out** — seed the store, bump to v12.0.0, deploy,
+   and validate the app-only connect live. Then tackle Phase 4b if concurrent
+   multi-tenant is needed.
 
-## Open questions
-- **App-only certificate auth** is the planned robust successor to device-code for
-  unattended cloud use (removes cold-start re-auth + the max-1-replica cap).
-- **v12 RBAC** still required for true multi-user; Easy Auth only gates *who
-  reaches the tool*, not per-user authorization (shared admin session).
-- **Local ACR data-plane read** fails from this workstation
-  (`CONNECTIVITY_CHALLENGE_ERROR`); root cause (stale token vs. network to
-  `*.azurecr.io`) not yet pinned down.
-- Should the native 3365 instance be relaunched from this repo to make the repo
-  the single runtime source of truth?
+## Open questions / watch-items
+- **Deploy-time lockout risk:** v12 enforcement requires the env group ids + a
+  populated store before it goes live, or operators are 403'd.
+- **Group-claim overage:** Entra truncates group claims for users in many groups;
+  `auth.js` flags `groupsOverage` but the Graph `memberOf` fallback is not built
+  yet (needed before relying on group-based rules at scale).
+- **Local ACR data-plane read** still fails from this workstation
+  (`CONNECTIVITY_CHALLENGE_ERROR`) — cosmetic for deploys (carried from session 2).
