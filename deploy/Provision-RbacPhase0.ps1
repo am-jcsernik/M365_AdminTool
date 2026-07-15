@@ -161,6 +161,7 @@ $ctx = $acct | ConvertFrom-Json
 Write-Info "Subscription : $($ctx.name) ($($ctx.id))"
 Write-Info "Tenant       : $($ctx.tenantId)"
 Write-Info "Signed in as : $($ctx.user.name)"
+$signedInUserId = Get-Az @('ad','signed-in-user','show','--query','id','-o','tsv')
 if (-not $Location) {
     $rg = Get-Az @('group','show','-n',$ResourceGroup,'-o','json')
     if ($rg) { $Location = ($rg | ConvertFrom-Json).location }
@@ -189,6 +190,15 @@ if ($existingKv) {
 $kvId = if ($existingKv) { ($existingKv | ConvertFrom-Json).id } else {
     $k = Get-Az @('keyvault','show','-n',$KeyVaultName,'-g',$ResourceGroup,'-o','json')
     if ($k) { ($k | ConvertFrom-Json).id } else { $null }
+}
+# In RBAC-authorization mode, creating the vault (control plane) does NOT grant
+# the creator data-plane rights. Grant the signed-in operator Certificates
+# Officer so this script can create/download the cert below. Idempotent.
+if ($kvId -and $signedInUserId -and $PSCmdlet.ShouldProcess($KeyVaultName, "Grant 'Key Vault Certificates Officer' to operator")) {
+    Invoke-Az @('role','assignment','create','--assignee-object-id',$signedInUserId,
+        '--assignee-principal-type','User','--role','Key Vault Certificates Officer',
+        '--scope',$kvId,'-o','none') -AllowFail | Out-Null
+    Write-Ok "Granted 'Key Vault Certificates Officer' to the operator (RBAC may take a minute to propagate)."
 }
 
 # ── 2. Container App system-assigned identity + KV role ────────────────
@@ -305,9 +315,19 @@ if (-not $SkipAppRegistration) {
             $policy = Get-Az @('keyvault','certificate','get-default-policy','-o','json')
             $polFile = New-TemporaryFile
             $policy | Set-Content -Path $polFile -Encoding utf8
-            Invoke-Az @('keyvault','certificate','create','--vault-name',$KeyVaultName,
-                '-n',$certName,'-p',"@$polFile",'-o','none') | Out-Null
+            # Retry to absorb data-plane RBAC propagation lag after the operator
+            # role grant above (ForbiddenByRbac until the assignment lands).
+            $attempt = 0; $maxAttempts = 12; $certOk = $false
+            while (-not $certOk -and $attempt -lt $maxAttempts) {
+                $attempt++
+                & az keyvault certificate create --vault-name $KeyVaultName -n $certName -p "@$polFile" -o none 2>$null
+                if ($LASTEXITCODE -eq 0) { $certOk = $true; break }
+                Write-Info "  cert create not authorized yet (RBAC propagating), retry $attempt/$maxAttempts in 20s..."
+                Start-Sleep -Seconds 20
+            }
             Remove-Item $polFile -ErrorAction SilentlyContinue
+            if (-not $certOk) { throw "Certificate create still ForbiddenByRbac after $maxAttempts attempts. Verify the operator has 'Key Vault Certificates Officer' on $KeyVaultName, then re-run." }
+            Write-Ok "Certificate '$certName' created in Key Vault."
         }
         # Upload the public cert to the app registration as a key credential.
         if ($PSCmdlet.ShouldProcess($appId, 'Attach public cert to app registration')) {
