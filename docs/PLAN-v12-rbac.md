@@ -103,15 +103,25 @@
   audited; localhost fallback still full-access.
 
 ### Phase 4 — Connection rework (`tenants.js`, `keyvault.js`)
-- Replace device-code connect with app-only cert connect per tenant:
+Split during implementation into 4a (shipped) and 4b (deferred).
+
+**4a — app-only certificate connect (DONE).**
+- App-only cert connect per tenant, fetched from Key Vault via the managed
+  identity at connect time (`keyvault.js` REST + MI, no SDK deps):
   `Connect-MgGraph -TenantId -ClientId -Certificate`,
   `Connect-ExchangeOnline -AppId -Certificate -Organization`.
+- Additive branch in the connect routes, chosen only when `KEY_VAULT_NAME` is
+  set and the tenant is app-only configured; device code remains the default
+  and fallback. Dockerfile COPY fixed to ship the new modules.
+- Verified locally (mocked KV + booted-server branch selection, 20/20).
+
+**4b — concurrent pool + scale (DEFERRED; needs live multi-tenant to validate).**
 - **Per-tenant connection pool** keyed by tenant slug (retire the single global
-  `connectionInfo`); device-code kept behind the local-dev fallback only.
-- Fetch certs from Key Vault via managed identity at connect time.
+  `connectionInfo`/session so multiple tenants connect concurrently).
 - Raise `maxReplicas` once concurrent tenants validate.
-- **Exit:** two users hit two tenants concurrently, unattended, no device code;
-  cold start needs no re-auth.
+- **Exit:** two users hit two tenants concurrently, unattended, no device code.
+- Until 4b lands, one tenant is connected at a time (single session), so
+  `maxReplicas` stays 1.
 
 ### Phase 5 — Admin UI (`public/index.html`)
 - Tenant dropdown by **friendly name** (from filtered `/api/config`).
