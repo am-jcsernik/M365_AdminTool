@@ -263,7 +263,9 @@ $deployArgs = @(
         "fileShareName=$FileShareName"
 )
 # ── v12 RBAC parameters (additive; safe defaults keep pre-v12 behavior) ──
-$deployKv = [bool]($DeployKeyVault -or $KeyVaultName)
+# Only the explicit -DeployKeyVault switch creates the vault; -KeyVaultName on
+# its own just wires the env var to an existing (out-of-band) vault.
+$deployKv = [bool]$DeployKeyVault
 $deployArgs += @(
     "deployKeyVault=$($deployKv.ToString().ToLower())",
     "keyVaultName=$KeyVaultName",

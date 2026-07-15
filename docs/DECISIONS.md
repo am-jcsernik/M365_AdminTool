@@ -5,6 +5,41 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-15 -- ADR-0008: v12.0.0 shipped and deployed; two Entra lockout prerequisites resolved at deploy
+**Context:** Phases 5 (admin UI + `/api/admin/*` CRUD) and 6 (guard-matrix
+integration tests, docs, version bump, deploy) completed v12. Deploying turns
+RBAC enforcement ON for the live app, and in-container **admin is group/env-only**
+(no admin-via-assignment path), so admin resolves solely from the Easy Auth
+`groups` claim. Pre-deploy checks found this would have been a self-inflicted
+outage: (1) both Entra access/admin groups were empty; (2) the Easy Auth app
+registration had `groupMembershipClaims = null`, so the forwarded token carried
+NO groups — every caller would be 403'd with no way to reach the admin UI to fix
+it; (3) the Bicep/`Deploy-ToAca.ps1` never wired `ACCESS_GROUP_ID`/`ADMIN_GROUP_ID`
+into the container env.
+**Decision:**
+- **Wire the bootstrap group ids** through `deploy/main.bicep` (new params) and
+  `Deploy-ToAca.ps1`; `deployKeyVault` gates vault *creation* only, so
+  `-KeyVaultName` alone reuses the Phase-0 vault (`deployKeyVault=false`).
+- **Enable group claims** on the Easy Auth app reg (`edb8be95…`):
+  `groupMembershipClaims = SecurityGroup`.
+- **Bootstrap a single admin:** add `jcsernik-adm@am.consulting` to the admin
+  group `bb661e80…` (chosen by the operator). The access group stays empty for now.
+- **Deploy from the `feature/v12-rbac` working tree** (not yet merged to `main`);
+  a PR/merge is a follow-up.
+- **Integration tests are Node's built-in runner** (`test/`, `npm test`): they
+  boot the real server and forge Easy Auth headers to drive the full guard
+  matrix offline (no Graph/PowerShell), including the DOCKER_MODE 401 path.
+**Consequences:** v12.0.0 is live (rev `--0000001`, image digest `fb366906…`,
+restarted for the rotated Easy Auth secret); `/api/health` correctly 302s to the
+home-tenant login. End-to-end admin is unproven until `jcsernik-adm` signs in and
+sees the Access Control panel — the group-claim → `req.user.groups` → `isAdmin`
+chain can only be confirmed interactively. App-only `Connect-MgGraph -Certificate`
+also gets its first live exercise post-deploy. Recovery if admin doesn't resolve:
+edit `access/rbac.json` on the Azure Files share, or re-check group membership +
+the token `groups` claim. Two bugs were caught and fixed during the phase: an
+`__audit` marker leaking into the persisted store, and the missing group-id env
+wiring above.
+
 ## 2026-07-14 -- ADR-0007: v12 implementation choices (branch, dependency-free Key Vault, Phase 4 split, local-dev admin)
 **Context:** Implementing v12 (Phases 0-4a this session) surfaced four practical
 decisions not fixed by the ADR-0006 design.
