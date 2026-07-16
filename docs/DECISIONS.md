@@ -5,6 +5,48 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-16 -- ADR-0011: App-only Exchange blocked by a broken EXO module in the container — bypass it with direct REST calls
+**Context:** Completing app-only Exchange (the remaining v12 follow-up). Shipped
+v12.1.4 first: a per-tenant `orgDomain` field so `Connect-ExchangeOnline
+-Organization` gets a domain (`am.consulting`) instead of the tenant GUID fallback
+(which fails), plus a hardened `deploy/Grant-ExoAppOnlyRole.ps1` (assign the
+individual View-Only management **roles**, not the "View-Only Organization
+Management" role **group**; StrictMode + `-Device` fixes). Ran the grant: SP
+registered in EXO, three read-only roles assigned. But every Exchange **report**
+then failed with a bare `HttpStatusCode=401` (empty body). Exhaustive ground-truth
+diagnosis (all via `az`, and by running app-only EXO *inside the live container* via
+`az containerapp exec` + a diagnostic staged on the Azure Files share) ruled out,
+in turn: wrong `-Organization` (fixed), SP registration, missing `Exchange.ManageAsApp`
+(consented), unassigned/disabled roles (all Enabled), propagation (12h+), and
+Conditional Access (no workload-identity policies; user CA doesn't apply to
+client-credential tokens). We even added the read-only **Global Reader** Entra role
+as the classic fallback — still 401.
+**The decisive test:** mint the app-only token in-container and hit the EXO REST API
+two ways. The token was correct (`roles=Exchange.ManageAsApp`, `aud=outlook.office365.com`);
+a **raw `adminapi/beta/{tid}/Mailbox` call returned HTTP 200**, but the **same token
+through the `ExchangeOnlineManagement` module (3.7.2) returned 401** — with the
+tell-tale `[System.Net.Http.HttpResponseMessage] does not contain a method named
+'GetResponseHeader'`, a .NET-version-drift bug in the module's error path on
+PowerShell 7.5.8. So authZ/permissions were fine all along; the **module** was the
+blocker, and since the app always runs through the module it masked every prior test.
+**Decision:** **Bypass the ExchangeOnlineManagement module for reports — call the EXO
+REST API (`adminapi`) directly** with an app-only token. Connect mints + caches the
+token (client-assertion with the KV cert) in the session instead of running
+`Connect-ExchangeOnline`; each Exchange report swaps its `Get-EXO*` cmdlet for an
+`Invoke-RestMethod` against `adminapi`, shaped to the same columns. Phasing:
+(1) mailbox reports (shared-mailboxes, mail-forwarding, mailbox-sizes, user-mailbox)
+→ `adminapi/.../Mailbox` + `MailboxStatistics`; (2) dl-members + user-inbox-rules →
+adminapi DistributionGroup/InboxRule (verify endpoints); (3) message-trace(-detail)
+→ a SEPARATE reporting API (not adminapi), a meatier lift. Deferred to a dedicated
+session. Keep the current Azure config (roles, Global Reader, `Exchange.ManageAsApp`,
+`orgDomain`) — it is correct and working.
+**Consequences:** Removes the fragile module dependency for Exchange and the
+device-code/session-affinity baggage; app-only Exchange becomes a stateless token +
+HTTPS call, consistent with the containerized model. Cost: reimplementing each report
+against REST semantics and reverse-engineering the message-trace reporting endpoint.
+Graph app-only is unaffected. Global Reader was likely unnecessary (RBAC-for-Apps was
+probably fine); left in place for now, revisit for least-privilege once REST works.
+
 ## 2026-07-15 -- ADR-0010: v12.1.3 — hosted connect card is app-only; Dockerfile COPY glob + guard; RBAC store repoint (second-user fix)
 **Context:** With Phase 4b live, a second user (dave@am.consulting) still could
 not connect — the deployed connect card presented the delegated sign-in controls

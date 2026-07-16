@@ -4,6 +4,44 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.4] — 2026-07-15
+
+### Fixed
+- **App-only Exchange connect now passes a domain, not the tenant GUID.** The
+  hosted connect card never supplied an `org`, so `buildExchangeAppOnlyConnect`
+  fell back to `tenant.tenantId` — a GUID — for `Connect-ExchangeOnline
+  -Organization`, which documents a verified/`.onmicrosoft.com` domain and does
+  not reliably accept the GUID. This would have failed every hosted Exchange
+  connect even after the EXO role grant.
+
+- **Exchange connect banner wording (hosted).** The Exchange "connecting" banner
+  now passes `appOnly` in `DOCKER_MODE`, so it reads "Signing in with the tenant's
+  app registration (certificate) — no browser…" instead of the stale "a browser
+  sign-in window should be open" text (the Graph banner was already fixed in 12.1.3).
+
+### Added
+- **Per-tenant `orgDomain` field.** Tenants now carry an optional `orgDomain`
+  (the verified/`.onmicrosoft.com` domain, e.g. `am.consulting`) used for the
+  Exchange app-only `-Organization` argument. Surfaced in the Tenants admin table
+  and add/edit form; persisted in the RBAC store. Resolution order for the connect
+  is `req.body.org` → `tenant.orgDomain` → `tenant.tenantId` (last-resort only).
+
+### Changed (tooling)
+- **`deploy/Grant-ExoAppOnlyRole.ps1` hardened.** `-Role` (single) → `-Roles`
+  (array), defaulting to the read-only management ROLES the reports need
+  (`View-Only Recipients`, `View-Only Configuration`, `Message Tracking`) instead
+  of the role GROUP "View-Only Organization Management" (which `New-ManagementRoleAssignment
+  -App` cannot accept). Each role is pre-checked with `Get-ManagementRole`; the
+  SP-exists message no longer references a `ServiceId` property that trips StrictMode.
+
+### Known issue
+- **App-only Exchange reports still fail (module bug, not config).** With app-only
+  auth proven working at the REST layer (raw `adminapi` call returns 200 with the
+  app token), the `ExchangeOnlineManagement` module (3.7.2) in the container returns
+  401 for its REST cmdlets on PowerShell 7.5/.NET (the `HttpResponseMessage`
+  `GetResponseHeader` bug). Fix planned: bypass the module and call the EXO REST API
+  directly (see `docs/DECISIONS.md` ADR-0011). Graph app-only is unaffected.
+
 ## [12.1.3] — 2026-07-15
 
 ### Changed

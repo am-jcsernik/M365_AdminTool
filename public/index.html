@@ -283,27 +283,29 @@ const adMsg=m=>m&&React.createElement("span",{style:{fontSize:11,color:m.startsW
 function adConfirm(q){return typeof window!=="undefined"&&window.confirm?window.confirm(q):true;}
 
 // Tenants: friendly name + tenantId + app-registration clientId + KV cert ref.
-function TenantAdmin({tenants,reload}){const blank={id:"",name:"",tenantId:"",clientId:"",certSecret:""};const[d,setD]=useState(blank);const[busy,setBusy]=useState(false);const[msg,setMsg]=useState("");
-  const edit=t=>{setMsg("");setD({id:t.id,name:t.name||"",tenantId:t.tenantId||"",clientId:t.clientId||"",certSecret:t.certSecret||""});};
+function TenantAdmin({tenants,reload}){const blank={id:"",name:"",tenantId:"",clientId:"",certSecret:"",orgDomain:""};const[d,setD]=useState(blank);const[busy,setBusy]=useState(false);const[msg,setMsg]=useState("");
+  const edit=t=>{setMsg("");setD({id:t.id,name:t.name||"",tenantId:t.tenantId||"",clientId:t.clientId||"",certSecret:t.certSecret||"",orgDomain:t.orgDomain||""});};
   const save=async()=>{if(!d.name.trim()){setMsg("Error: name is required");return;}setBusy(true);setMsg("");try{const r=await api.post("/api/admin/tenants",d);if(r.error)setMsg("Error: "+r.error);else{setD(blank);setMsg("Saved");await reload();}}catch(e){setMsg("Error: "+e.message);}setBusy(false);};
   const del=async t=>{if(!adConfirm(`Delete tenant "${t.name}" (${t.id})? Roles scoped to it will be updated.`))return;const r=await api.del("/api/admin/tenants/"+encodeURIComponent(t.id));if(r.error)setMsg("Error: "+r.error);else await reload();};
   const cell={padding:"6px 10px",borderBottom:"1px solid var(--border2)",color:"var(--fg2)",fontFamily:M,fontSize:11.5,textAlign:"left",verticalAlign:"top",wordBreak:"break-all"};
   return React.createElement("div",{style:{marginBottom:8}},
     React.createElement("div",{style:{overflowX:"auto",border:"1px solid var(--border)",borderRadius:6,marginBottom:10}},
       React.createElement("table",{style:{width:"100%",borderCollapse:"collapse"}},
-        React.createElement("thead",null,React.createElement("tr",null,["Name","Tenant ID","Client ID","Cert (KV ref)",""].map(h=>React.createElement("th",{key:h,style:{...cell,background:"var(--t-head)",color:"var(--fg3)",fontWeight:600,textTransform:"uppercase",letterSpacing:.4,fontSize:10}},h)))),
-        React.createElement("tbody",null,(tenants||[]).length===0?React.createElement("tr",null,React.createElement("td",{colSpan:5,style:{...cell,color:"var(--fg4)"}},"No tenants defined.")):tenants.map(t=>React.createElement("tr",{key:t.id},
+        React.createElement("thead",null,React.createElement("tr",null,["Name","Tenant ID","Client ID","Cert (KV ref)","Org domain (EXO)",""].map(h=>React.createElement("th",{key:h,style:{...cell,background:"var(--t-head)",color:"var(--fg3)",fontWeight:600,textTransform:"uppercase",letterSpacing:.4,fontSize:10}},h)))),
+        React.createElement("tbody",null,(tenants||[]).length===0?React.createElement("tr",null,React.createElement("td",{colSpan:6,style:{...cell,color:"var(--fg4)"}},"No tenants defined.")):tenants.map(t=>React.createElement("tr",{key:t.id},
           React.createElement("td",{style:cell},t.name," ",React.createElement("span",{style:{color:"var(--fg4)"}},"("+t.id+")")),
           React.createElement("td",{style:cell},t.tenantId||"—"),
           React.createElement("td",{style:cell},t.clientId||"—"),
           React.createElement("td",{style:cell},t.certSecret||"—"),
+          React.createElement("td",{style:cell},t.orgDomain||"—"),
           React.createElement("td",{style:{...cell,whiteSpace:"nowrap"}},React.createElement("button",{onClick:()=>edit(t),style:{...AD_BTN,marginRight:5}},"Edit"),React.createElement("button",{onClick:()=>del(t),style:{...AD_BTN,color:"#ef4444"}},"Delete")))))))
     ,
     React.createElement("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))",gap:8,alignItems:"end"}},
       React.createElement("div",null,React.createElement("label",{style:AD_LBL},d.id?"Name (editing "+d.id+")":"Name"),React.createElement("input",{style:AD_IN,value:d.name,onChange:e=>setD({...d,name:e.target.value}),placeholder:"AM Consulting"})),
       React.createElement("div",null,React.createElement("label",{style:AD_LBL},"Tenant ID"),React.createElement("input",{style:AD_IN,value:d.tenantId,onChange:e=>setD({...d,tenantId:e.target.value}),placeholder:"am.consulting"})),
       React.createElement("div",null,React.createElement("label",{style:AD_LBL},"Client ID"),React.createElement("input",{style:AD_IN,value:d.clientId,onChange:e=>setD({...d,clientId:e.target.value}),placeholder:"app-reg GUID"})),
-      React.createElement("div",null,React.createElement("label",{style:AD_LBL},"Cert (KV ref)"),React.createElement("input",{style:AD_IN,value:d.certSecret,onChange:e=>setD({...d,certSecret:e.target.value}),placeholder:"kv:m365-report-am"}))),
+      React.createElement("div",null,React.createElement("label",{style:AD_LBL},"Cert (KV ref)"),React.createElement("input",{style:AD_IN,value:d.certSecret,onChange:e=>setD({...d,certSecret:e.target.value}),placeholder:"kv:m365-report-am"})),
+      React.createElement("div",null,React.createElement("label",{style:AD_LBL},"Org domain (EXO)"),React.createElement("input",{style:AD_IN,value:d.orgDomain,onChange:e=>setD({...d,orgDomain:e.target.value}),placeholder:"am.consulting"}))),
     React.createElement("div",{style:{marginTop:10,display:"flex",alignItems:"center"}},React.createElement("button",{onClick:save,disabled:busy,style:{...AD_BTN,color:"#60a5fa",borderColor:"rgba(96,165,250,.35)"}},busy?"Saving…":d.id?"Update tenant":"Add tenant"),d.id&&React.createElement("button",{onClick:()=>{setD(blank);setMsg("");},style:{...AD_BTN,marginLeft:6}},"Cancel"),adMsg(msg)));}
 
 // Roles: name + tenant scope ("*" or a set) + report scope ("*" or areas/ids).
@@ -449,7 +451,7 @@ function App(){const[dark,setDark]=useState(true);const[search,setSearch]=useSta
       graphOk&&React.createElement("button",{onClick:disco,style:{background:"var(--card-h)",border:"1px solid var(--border)",color:"var(--err)",padding:"5px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:S}},"Disconnect"),
       sessAlive&&React.createElement("button",{onClick:restartSess,style:{background:"var(--card-h)",border:"1px solid var(--border)",color:"var(--fg3)",padding:"5px 10px",borderRadius:5,cursor:"pointer",fontSize:11,fontFamily:S}},"Restart"),
       React.createElement("button",{onClick:()=>setDark(!dark),style:{background:"var(--card-h)",border:"1px solid var(--border)",color:"var(--fg2)",padding:"4px 8px",borderRadius:5,cursor:"pointer",fontSize:12}},dark?React.createElement(Icon,{name:"sun",size:14}):React.createElement(Icon,{name:"moon",size:14})))),
-    connecting==="exchange"&&React.createElement("div",{style:{padding:"10px 24px 0"}},React.createElement(ConnectBanner,{connecting,startedAt:connStart,useDevCode,deviceCode:devCode})),
+    connecting==="exchange"&&React.createElement("div",{style:{padding:"10px 24px 0"}},React.createElement(ConnectBanner,{connecting,startedAt:connStart,useDevCode,deviceCode:devCode,appOnly:hosted})),
 
   React.createElement("div",{style:{padding:"12px 24px 0"}},
     noAccess&&React.createElement("div",{style:{margin:"12px 0",padding:"14px 18px",background:"rgba(239,68,68,.08)",border:"1px solid rgba(239,68,68,.3)",borderRadius:8,color:"var(--fg2)",fontSize:13,fontFamily:S}},React.createElement("b",null,"No access. "),"Your account is signed in but not authorized to use this tool. Ask an administrator to grant your account (or a group you belong to) a role in Access Control."),

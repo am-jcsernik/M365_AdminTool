@@ -15,8 +15,14 @@
 
       1. Register the Entra service principal in Exchange Online
          (New-ServicePrincipal) -- skipped if it already exists.
-      2. Assign it a read-only management role (default:
-         "View-Only Organization Management") -- skipped if already assigned.
+      2. Assign it one or more read-only management ROLES (default:
+         "View-Only Recipients", "View-Only Configuration", "Message Tracking")
+         -- each skipped if already assigned.
+
+    NOTE: -Role takes management ROLES, not role GROUPS. "View-Only Organization
+    Management" is a role *group* and cannot be assigned to an app via
+    New-ManagementRoleAssignment -- the underlying view-only management roles are
+    assigned individually instead.
 
     It resolves the service principal's object ID automatically from the -ClientId
     via Azure CLI (`az ad sp show`) when -SpObjectId is not supplied, so you don't
@@ -37,9 +43,11 @@
     The Exchange Online organization to connect to (e.g. am.consulting). Required
     for app connection context and for the -Organization hint on Connect.
 
-.PARAMETER Role
-    The Exchange management role to assign. Defaults to
-    "View-Only Organization Management" (read-only, sufficient for the reports).
+.PARAMETER Roles
+    One or more Exchange management ROLES to assign to the app. Defaults to the
+    read-only set the reports require: "View-Only Recipients",
+    "View-Only Configuration", "Message Tracking". Must be management roles, not
+    role groups (see the note above).
 
 .PARAMETER SpObjectId
     The service principal (enterprise application) object ID. If omitted, the
@@ -64,10 +72,10 @@
 
 .EXAMPLE
     ./Grant-ExoAppOnlyRole.ps1 -ClientId <guid> -SpObjectId <guid> `
-        -Organization contoso.com -Role "View-Only Recipients"
+        -Organization contoso.com -Roles "View-Only Recipients"
 
     Onboard a different tenant's app-only SP with an explicit object ID and a
-    narrower role.
+    single, narrower role.
 
 .NOTES
     Requires:
@@ -88,7 +96,7 @@ param(
     [Parameter(Mandatory)]
     [string] $Organization,
 
-    [string] $Role = 'View-Only Organization Management',
+    [string[]] $Roles = @('View-Only Recipients', 'View-Only Configuration', 'Message Tracking'),
 
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string] $SpObjectId,
@@ -154,7 +162,9 @@ try {
 }
 
 if ($existingSp) {
-    Write-Ok "Exchange service principal already registered (ObjectId $($existingSp.ServiceId))."
+    # Note: reference AppId/DisplayName only — the object shape varies by module
+    # version and Set-StrictMode throws on a missing property (e.g. ServiceId).
+    Write-Ok "Exchange service principal already registered (AppId $($existingSp.AppId))."
 } else {
     if ($PSCmdlet.ShouldProcess($ClientId, "New-ServicePrincipal ($DisplayName)")) {
         try {
@@ -166,26 +176,37 @@ if ($existingSp) {
     }
 }
 
-# ── 4. Assign the management role (idempotent) ────────────────────────
-Write-Step "Ensuring management role assignment '$Role'"
-# Match on both role and assignee so we don't create a duplicate assignment.
-$existingAssignment = $null
-try {
-    $existingAssignment = Get-ManagementRoleAssignment -RoleAssignee $ClientId -ErrorAction Stop |
-        Where-Object { $_.Role -eq $Role }
-} catch {
-    $existingAssignment = $null
-}
+# ── 4. Assign the management role(s) (idempotent, per role) ───────────
+foreach ($role in $Roles) {
+    Write-Step "Ensuring management role assignment '$role'"
 
-if ($existingAssignment) {
-    Write-Ok "Role '$Role' is already assigned to the app service principal."
-} else {
-    if ($PSCmdlet.ShouldProcess($ClientId, "New-ManagementRoleAssignment -Role '$Role'")) {
-        try {
-            New-ManagementRoleAssignment -App $ClientId -Role $Role -ErrorAction Stop | Out-Null
-            Write-Ok "Assigned '$Role' to the app service principal."
-        } catch {
-            throw "New-ManagementRoleAssignment failed: $($_.Exception.Message)"
+    # Guard: -Role must be a management ROLE, not a role GROUP. Fail early with a
+    # clear message rather than the opaque "management role can't be found".
+    $roleObj = $null
+    try { $roleObj = Get-ManagementRole -Identity $role -ErrorAction Stop } catch { $roleObj = $null }
+    if (-not $roleObj) {
+        throw "Management role '$role' was not found. Confirm it is a management ROLE (not a role GROUP such as 'View-Only Organization Management'). List candidates with: Get-ManagementRole | Where-Object Name -like 'View-Only*'."
+    }
+
+    # Match on both role and assignee so we don't create a duplicate assignment.
+    $existingAssignment = $null
+    try {
+        $existingAssignment = Get-ManagementRoleAssignment -RoleAssignee $ClientId -ErrorAction Stop |
+            Where-Object { $_.Role -eq $role }
+    } catch {
+        $existingAssignment = $null
+    }
+
+    if ($existingAssignment) {
+        Write-Ok "Role '$role' is already assigned to the app service principal."
+    } else {
+        if ($PSCmdlet.ShouldProcess($ClientId, "New-ManagementRoleAssignment -Role '$role'")) {
+            try {
+                New-ManagementRoleAssignment -App $ClientId -Role $role -ErrorAction Stop | Out-Null
+                Write-Ok "Assigned '$role' to the app service principal."
+            } catch {
+                throw "New-ManagementRoleAssignment failed for '$role': $($_.Exception.Message)"
+            }
         }
     }
 }

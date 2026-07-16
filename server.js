@@ -472,7 +472,8 @@ app.post("/api/connect/exchange", (req, res) => {
       try {
         const cert = await tenants.stageTenantCert(appTenant, KEY_VAULT_NAME);
         s.certPath = cert.path;
-        const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, req.body && req.body.org);
+        const org = (req.body && req.body.org) || appTenant.orgDomain || null;
+        const cmd = tenants.buildExchangeAppOnlyConnect(appTenant, cert.path, org);
         // raw: see the Graph app-only note — the command writes to __OUTFILE__.
         sessions.runInSession(s, cmd, jobId, { timeout: 120000, raw: true });
         const iv = setInterval(() => { const j = jobs.get(jobId); if (j && j.status !== "running" && j.status !== "queued") { clearInterval(iv); if (j.status === "completed" && j.output && j.output.trim()) s.connectionInfo.exchangeConnected = true; } }, 500);
@@ -886,7 +887,7 @@ app.get("/api/admin/store", requireAdmin, (req, res) => {
 
 // ── Tenants ───────────────────────────────────────────────────────────
 app.post("/api/admin/tenants", requireAdmin, (req, res) => {
-  const { id, name, tenantId, clientId, certSecret } = req.body || {};
+  const { id, name, tenantId, clientId, certSecret, orgDomain } = req.body || {};
   if (!name || !String(name).trim()) return res.status(400).json({ error: "Tenant name is required" });
   mutateStore(req, res, "admin.tenant.save", (s) => {
     const sid = (id && String(id).trim()) || adminSlug(name);
@@ -896,6 +897,9 @@ app.post("/api/admin/tenants", requireAdmin, (req, res) => {
       tenantId: (tenantId && String(tenantId).trim()) || null,
       clientId: (clientId && String(clientId).trim()) || null,
       certSecret: (certSecret && String(certSecret).trim()) || null,
+      // Exchange app-only -Organization: a verified/.onmicrosoft.com domain (NOT
+      // the tenant GUID). Optional; falls back to tenantId only if unset.
+      orgDomain: (orgDomain && String(orgDomain).trim()) || null,
     };
     const i = s.tenants.findIndex(t => t.id === sid);
     if (i >= 0) s.tenants[i] = entry; else s.tenants.push(entry);

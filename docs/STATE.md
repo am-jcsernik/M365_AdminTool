@@ -1,106 +1,85 @@
 # Project State
-_Last updated: 2026-07-15 -- session 6_
+_Last updated: 2026-07-16 -- session 7_
 
 ## Current goal
-**v12.1.3 SHIPPED and DEPLOYED — second-user credential-bleed fully closed and
-validated live.** The Phase 4b app-only model is now proven end-to-end with a
-real second user (dave@am.consulting) connecting successfully. This session:
-(1) diagnosed + fixed the live "second user can't connect" failure — a **data**
-misconfiguration in the RBAC store, not a code bug; (2) cleaned up the connect
-card for the app-only hosted model; (3) hardened the Dockerfile against the
-recurring module-COPY crash-loop. Both open PRs merged to `main`.
+**App-only Exchange.** Shipped **v12.1.4** (deployed) with the `orgDomain` fix +
+hardened grant script, ran the EXO role grant, then chased why Exchange **reports**
+still 401'd. Root cause found and proven: **not Azure/RBAC — the
+`ExchangeOnlineManagement` module (3.7.2) in the container is broken for app-only
+REST cmdlets** on PowerShell 7.5/.NET. Decision (ADR-0011): **bypass the module and
+call the EXO REST API (`adminapi`) directly.** That rewrite is **deferred to the next
+session** (wrapped here by request).
 
 ## Status
-- [x] **Second-user connect failure diagnosed from ground truth.** Pulled the live
-      RBAC store + audit log + Entra group membership via `az`. Root cause: the
-      `am-full-read` role's assignment pointed at the **"M365 Admin Reports -
-      Access"** group (`197dd092…`, which Dave is NOT in) instead of **"M365 Admin
-      Reports - AM Full Read"** (`8c763eb0…`, which he is). His token carried none
-      of the store's referenced groups → `hasToolAccess` = false → denied at the
-      access gate ("Not authorized to use this tool") before any tenant logic.
-      The role being *named* `am-full-read` while assigned to the *Access* group
-      was the trap. (Not group-claim overage — Dave is in ~30 groups, under cutoff.)
-- [x] **RBAC store repointed (LIVE, out-of-band).** Repointed the assignment
-      `197dd092` → `8c763eb0` directly on the Azure Files store; original backed up
-      to `access/rbac.json.bak-20260715-repoint`. `rbac.js` hot-reloads on mtime,
-      so it took effect without a deploy. **Dave refreshed and connected — verified.**
-- [x] **#1 Connect card app-only cleanup** (`public/index.html`). In `DOCKER_MODE`:
-      hide the delegated-only controls (UPN, "Tenant ID", device-code checkbox,
-      "Connect as Current User"); show only the tenant selector + Connect (disabled
-      until a tenant is picked); connecting banner drops the browser-sign-in
-      wording. Added a clear **"No access — ask an admin"** banner for the RBAC-gate
-      case (the exact dead-end Dave hit) + a "no tenant granted" note. Localhost
-      keeps the delegated fallback (reads `dockerMode` from `/api/health`).
-- [x] **#2 Dockerfile crash-loop guard.** `COPY *.js ./` replaces the fragile
-      per-file list (fell out of sync twice: ADR-0007 auth/rbac; v12.1.1 sessions).
-      New `npm run lint:copy` (`scripts/lint-copy.js`) walks the `server.js`
-      require() graph and fails if any module is unresolved or uncopied.
-- [x] **Versioned + validated.** Bumped **12.1.3**; both changelogs updated.
-      `npm test` 22/22; `npm run lint` + `lint:copy` green; Babel-transformed the
-      JSX (no syntax errors); ran the 12.1.3 build locally (page serves, health OK).
-- [x] **Deployed 12.1.3 to ACA** and verified (see below).
-- [x] **Both PRs merged to `main`.** PR #1 (Phase 4b, `feature/v12-phase4b`) and
-      PR #2 (this session, `fix/connect-card-apponly`). `main` @ `34217d5` now
-      matches what is live.
-- [x] **`/access/` added to `.gitignore`** — local runtime RBAC store (seeded
-      under `DATA_DIR`, defaults to cwd in dev) must never be committed.
+- [x] **v12.1.4 shipped + deployed.** Per-tenant `orgDomain` (server whitelist +
+      entry, admin table/form, connect resolution `req.body.org → orgDomain →
+      tenantId`); Exchange connect banner now app-only-aware in `DOCKER_MODE`;
+      grant script hardened (role-list, StrictMode, `-Device`). Tests 22/22, lint +
+      lint:copy + Babel all green. Live on ACA rev **`m365-admin-reports--0000008`**.
+- [x] **EXO role grant done.** App SP registered in Exchange Online + assigned
+      `View-Only Recipients`, `View-Only Configuration`, `Message Tracking`
+      (Enabled=True). Also added **Global Reader** Entra role as a fallback.
+- [x] **`orgDomain=am.consulting` set on the AM tenant** (live, via admin UI). App-only
+      Exchange **connect** verified working (`-Organization am.consulting`, token Active).
+- [x] **Root cause proven (ADR-0011).** In-container test: app-only token is correct
+      (`roles=Exchange.ManageAsApp`); **raw `adminapi/.../Mailbox` → HTTP 200**, but the
+      **module's `Get-EXOMailbox` → 401** + `.NET GetResponseHeader` bug. AuthZ/permissions
+      are fine; the module masked every prior test (the app always uses the module).
+- [ ] **Direct-REST rewrite — NEXT SESSION.** See below.
+- [ ] **Uncommitted.** All of session 7's code is uncommitted (see below).
 
-## Deploy — v12.1.3 LIVE (session 6)
+## NEXT SESSION should start by
+Implement **ADR-0011: bypass the EXO module with direct `adminapi` REST calls.**
+- **Mechanism:** Connect mints + caches an app-only token for `outlook.office365.com`
+  (client-assertion with the KV cert — proven flow) in the session
+  (`$global:ExoToken`/`$ExoTid`), replacing `Connect-ExchangeOnline`; re-mint on ~1h
+  expiry. Each Exchange report swaps its `Get-EXO*` cmdlet for `Invoke-RestMethod`
+  against `adminapi/beta/{tid}/...` with OData `$filter`/`$select`, shaped to the same
+  columns. Touches `tenants.js` (buildExchangeAppOnlyConnect), `server.js`
+  (/api/connect/exchange), `reports.js` (the 8 `ex:true` reports), maybe `sessions.js`.
+- **Phasing (agreed):** (1) mailbox reports — shared-mailboxes, mail-forwarding,
+  mailbox-sizes, user-mailbox → `Mailbox` + `MailboxStatistics` (easy, proven 200);
+  (2) dl-members + user-inbox-rules → adminapi DistributionGroup/InboxRule (verify
+  endpoints); (3) message-trace(-detail) → SEPARATE reporting API, meatier — likely its
+  own iteration. Recommend: prove **shared-mailboxes** end-to-end in the container first.
+- **Validate** each in the deployed container via the exec/REST technique below, then a
+  real report run in the UI. Bump version, changelog, redeploy.
+
+## Deploy — v12.1.4 LIVE (session 7)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
-- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.3` (also tagged `latest`),
-  revision **`m365-admin-reports--0000007`**, single active revision, 100% traffic
-  (old `--0000006` drained to 0), min 0 / max 1. RG `rg-m365admin`, eastus2.
-- **Quick-roll deploy** (not the full script): `az acr build --no-logs -r amm365acr
-  -t m365-admin-reports:12.1.3 .` then `az containerapp update -n
-  m365-admin-reports -g rg-m365admin --image …:12.1.3`. Preserves Easy Auth / KV /
-  storage config (avoids the full script's secret-rotation + revision restart).
-- Revision came up **Healthy** with a replica — real-world proof the `COPY *.js`
-  image ships every module (the crash-loop mode that killed 12.1.0 did not recur).
+- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.4` (+`latest`), rev
+  **`m365-admin-reports--0000008`**, Healthy, 100% traffic, 0 restarts. RG
+  `rg-m365admin`, eastus2. min 0 / max 1.
+- Quick-roll: `az acr build --no-logs -r amm365acr -t m365-admin-reports:<v> -t
+  m365-admin-reports:latest .` then `az containerapp update -n m365-admin-reports -g
+  rg-m365admin --image …:<v>`.
 
-## Active context
-- **Branch:** `main` @ `34217d5` (clean, synced with origin). No feature branch
-  open. Remotes: `origin` (am-jcsernik), `personal` (arcenik86).
-- **`gh` auth:** now has BOTH accounts; `am-jcsernik` is the active account (it is
-  the collaborator on `origin`). `arcenik86` alone could not create PRs on origin
-  ("must be a collaborator"). Git push uses SSH and works regardless.
-- **RBAC store model (live):** accessGroupId `197dd092` (Access — currently empty,
-  the future "who may open the tool" gate); adminGroupId `bb661e80`; tenant
-  `am-consulting` (clientId `25407385…`, cert `kv:m365-report-am`, tenantId
-  `50e2cd3f…`); role `am-full-read` (tenants `*`, reports `*`) assigned to the
-  **AM Full Read** group `8c763eb0` (Dave). Note: `hasToolAccess` grants entry to
-  any role-holder, so a role assignment alone lets a user in even if the Access
-  group is empty.
-- **Store/audit are on the Azure Files share** `amm365data/m365data`:
-  `access/rbac.json`, `M365AuditLog/audit-YYYY-MM.jsonl`. Readable via
-  `az storage file download` with the account key (non-secret metadata).
+## Uncommitted changes (session 7 — awaiting commit)
+- `server.js` (orgDomain whitelist/entry + connect resolution), `public/index.html`
+  (orgDomain admin field + Exchange banner `appOnly`), `deploy/Grant-ExoAppOnlyRole.ps1`
+  (role-list/StrictMode/`-Device`), `package.json` (12.1.4), `CHANGELOG.md`, `docs/*`.
+- **Note:** the deployed rev `0000008` was built BEFORE the banner edit, so the live UI
+  still shows the old Exchange banner text; the fix lands with the next deploy.
+- Pre-existing uncommitted (from before session 7): `CHANGELOG.md`, `deploy/Grant-…`,
+  `package.json`, `public/index.html`, `server.js` were already modified at session start.
 
-## Manual follow-ups still open
-- **Exchange app-only** — assign the app SP an Exchange RBAC role via
-  `deploy/Grant-ExoAppOnlyRole.ps1`, then Connect Exchange. Only if mailbox
-  reports are needed. (Only Graph app-only is proven so far.)
-- **Group-claim overage fallback** — `auth.js` flags overage; the Graph `memberOf`
-  fallback is still not built. Needed only for users in enough groups (~150+ SAML /
-  200+ JWT) that Entra drops the `groups` claim. Not hit yet.
-- **Access group is empty** — decide whether to actually use `197dd092` as the
-  gate (add members) or lean solely on role assignments for entry.
+## Azure config that IS correct — leave alone
+- App `Exchange.ManageAsApp` consented; EXO SP registered (AppId 25407385… ↔ objectId
+  dea11da4…); management roles assigned + Enabled; Global Reader assigned; no CA block;
+  `orgDomain=am.consulting` on AM tenant. All verified. The ONLY remaining problem is
+  the module — fix is code (direct REST), not Azure.
 
-## Next session should start by
-1. Confirm nothing regressed post-deploy; optionally have another non-admin user
-   exercise the flow now that the UI is cleaner.
-2. If mailbox reports are wanted: run `deploy/Grant-ExoAppOnlyRole.ps1` and
-   validate app-only **Exchange** connect.
-3. Optional UX: allow switching tenants after connect (the connect card, and thus
-   the tenant selector, currently only shows while disconnected — a connected user
-   must disconnect to switch). Consider a compact tenant switcher in the header.
-4. Optional: build the group-claim overage `memberOf` fallback in `auth.js`.
-5. Decide min-replicas (0 vs 1) — app-only has no device-code re-auth cost on cold
-   start, but sessions still re-connect lazily; weigh latency vs cost.
+## Diagnostic technique (reusable)
+- Run app-only EXO **inside the live container** via `az containerapp exec` (its managed
+  identity can read the KV cert; `jcsernik-adm` canNOT read amm365kv secrets data-plane).
+- exec command path 404s if too long — keep `pwsh -EncodedCommand <UTF16LE-b64>` under
+  ~1550 chars; many rapid exec calls → HTTP 429 (retry-after 600s). For longer scripts,
+  upload to the Azure Files share `m365data` (mounted `/app/data`; key via
+  `az storage account keys list -n amm365data`) and run once with `pwsh -File
+  /app/data/x.ps1`, writing results to `/app/data/*.out` to download. minReplicas=0 →
+  `/tmp` + staged certs vanish on scale-down.
 
-## Open questions / watch-items
-- **Multi-replica** needs ACA session affinity (sessions are per-replica in
-  memory) — out of scope; `maxReplicas` stays 1.
-- **Deploying from a branch** was done again this session (built 12.1.3 before PR
-  #2 merged), then merged after. Fine, but keep merging promptly so `main` stays
-  the live truth.
-- Deploy secrets (ACR pw, storage key, Easy Auth secret) still print in the full
-  deploy script's console output. Cosmetic; the quick-roll path above avoids it.
+## Manual follow-ups still open (unchanged)
+- Group-claim overage `memberOf` fallback in `auth.js` — not built, not yet hit.
+- Access group `197dd092` empty — decide gate strategy vs role-assignment entry.
+- Decide min-replicas (0 vs 1).
