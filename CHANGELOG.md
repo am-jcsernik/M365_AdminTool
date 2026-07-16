@@ -4,6 +4,40 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.5] — 2026-07-16
+
+### Fixed
+- **App-only Exchange reports now work — the broken EXO module is bypassed
+  (ADR-0011).** `ExchangeOnlineManagement` 3.7.2 fails every app-only REST cmdlet
+  on PowerShell 7.5/.NET (its error path calls the removed
+  `HttpResponseMessage.GetResponseHeader`, surfacing as a bare `401`) even though
+  the app's permissions are correct. The Exchange connect no longer runs
+  `Connect-ExchangeOnline`; instead it mints an app-only token for
+  `outlook.office365.com` (client-assertion signed with the tenant's Key Vault
+  cert) and calls the EXO REST admin API (`adminapi` `InvokeCommand`) directly.
+  Proven end-to-end in the live container against 107 mailboxes.
+
+### Added
+- **Session-global Exchange REST helpers** (`tenants.js`,
+  `buildExchangeAppOnlyConnect`): `Get-ExoRestToken` (mint/cache the app-only
+  token, re-mints ~2 min before expiry) and `Invoke-ExoRest` (run any EXO cmdlet
+  over `adminapi InvokeCommand`, with `@odata.nextLink` paging and clean error
+  propagation). Connect verifies with a cheap `Get-OrganizationConfig`.
+
+### Changed
+- **Phase-1 Exchange reports rewritten onto `Invoke-ExoRest`** (`reports.js`):
+  `shared-mailboxes`, `mail-forwarding`, `mailbox-sizes`, `user-mailbox`. Over
+  REST `TotalItemSize` is a string (`"1.4 GB (n bytes)"`), so `mailbox-sizes` now
+  parses the byte count from the string for sorting instead of the module's typed
+  `.Value.ToBytes()`.
+
+### Known limitations
+- `mailbox-sizes` stats each mailbox with its own REST call (107 at AM), so it is
+  the slow report; within the 5-min job timeout but a candidate for batching.
+- Phase 2 (`dl-members`, `user-inbox-rules`, `mailbox-permissions`,
+  `all-forwarding-rules`) and phase 3 (`message-trace`/`-detail`, a separate
+  reporting API) still use the old module cmdlets and remain to be ported.
+
 ## [12.1.4] — 2026-07-15
 
 ### Fixed

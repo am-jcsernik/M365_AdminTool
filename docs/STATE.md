@@ -1,14 +1,15 @@
 # Project State
-_Last updated: 2026-07-16 -- session 7_
+_Last updated: 2026-07-16 -- session 8_
 
 ## Current goal
-**App-only Exchange.** Shipped **v12.1.4** (deployed) with the `orgDomain` fix +
-hardened grant script, ran the EXO role grant, then chased why Exchange **reports**
-still 401'd. Root cause found and proven: **not Azure/RBAC — the
-`ExchangeOnlineManagement` module (3.7.2) in the container is broken for app-only
-REST cmdlets** on PowerShell 7.5/.NET. Decision (ADR-0011): **bypass the module and
-call the EXO REST API (`adminapi`) directly.** That rewrite is **deferred to the next
-session** (wrapped here by request).
+**App-only Exchange — ADR-0011 phase 1 SHIPPED (v12.1.5, deployed).** The
+`ExchangeOnlineManagement` module bypass is built and live: the Exchange connect
+no longer runs `Connect-ExchangeOnline`; it mints an app-only token for
+`outlook.office365.com` (client-assertion signed with the KV cert) and calls the
+EXO REST admin API (`adminapi InvokeCommand`) directly via two session-global
+helpers (`Get-ExoRestToken`, `Invoke-ExoRest`). The four phase-1 mailbox reports
+were rewritten onto `Invoke-ExoRest` and **validated end-to-end in the live
+container** against real data (107 mailboxes). Phases 2-3 remain (see below).
 
 ## Status
 - [x] **v12.1.4 shipped + deployed.** Per-tenant `orgDomain` (server whitelist +
@@ -25,43 +26,49 @@ session** (wrapped here by request).
       (`roles=Exchange.ManageAsApp`); **raw `adminapi/.../Mailbox` → HTTP 200**, but the
       **module's `Get-EXOMailbox` → 401** + `.NET GetResponseHeader` bug. AuthZ/permissions
       are fine; the module masked every prior test (the app always uses the module).
-- [ ] **Direct-REST rewrite — NEXT SESSION.** See below.
-- [ ] **Uncommitted.** All of session 7's code is uncommitted (see below).
+- [x] **Direct-REST rewrite — phase 1 SHIPPED (v12.1.5).** `tenants.js`
+      `buildExchangeAppOnlyConnect` rewritten to define `Get-ExoRestToken` +
+      `Invoke-ExoRest` (session-global) and verify with `Get-OrganizationConfig`;
+      `reports.js` phase-1 reports (shared-mailboxes, mail-forwarding, mailbox-sizes,
+      user-mailbox) rewritten onto `Invoke-ExoRest`. Tests 22/22, both lints green.
+      Validated in-container (deploy/validate-exo-reports.ps1) and deployed.
+- [x] **Committed.** Session 7's v12.1.4 code is committed on `main` @ `4870eaf`.
 
 ## NEXT SESSION should start by
-Implement **ADR-0011: bypass the EXO module with direct `adminapi` REST calls.**
-- **Mechanism:** Connect mints + caches an app-only token for `outlook.office365.com`
-  (client-assertion with the KV cert — proven flow) in the session
-  (`$global:ExoToken`/`$ExoTid`), replacing `Connect-ExchangeOnline`; re-mint on ~1h
-  expiry. Each Exchange report swaps its `Get-EXO*` cmdlet for `Invoke-RestMethod`
-  against `adminapi/beta/{tid}/...` with OData `$filter`/`$select`, shaped to the same
-  columns. Touches `tenants.js` (buildExchangeAppOnlyConnect), `server.js`
-  (/api/connect/exchange), `reports.js` (the 8 `ex:true` reports), maybe `sessions.js`.
-- **Phasing (agreed):** (1) mailbox reports — shared-mailboxes, mail-forwarding,
-  mailbox-sizes, user-mailbox → `Mailbox` + `MailboxStatistics` (easy, proven 200);
-  (2) dl-members + user-inbox-rules → adminapi DistributionGroup/InboxRule (verify
-  endpoints); (3) message-trace(-detail) → SEPARATE reporting API, meatier — likely its
-  own iteration. Recommend: prove **shared-mailboxes** end-to-end in the container first.
-- **Validate** each in the deployed container via the exec/REST technique below, then a
-  real report run in the UI. Bump version, changelog, redeploy.
+**ADR-0011 phase 2 + 3** (the transport is proven; `Invoke-ExoRest -Cmdlet <X>
+-Parameters @{...}` runs any EXO cmdlet over `adminapi InvokeCommand`, with paging):
+- **Phase 2 (cmdlet-based, low risk):** rewrite `dl-members` (Get-DistributionGroup
+  / Get-DistributionGroupMember), `user-inbox-rules` (Get-InboxRule),
+  `all-forwarding-rules` (Get-Mailbox + Get-InboxRule), `mailbox-permissions`
+  (Get-MailboxPermission + Get-RecipientPermission) onto `Invoke-ExoRest`. Verify the
+  Guid/Identity field shapes over REST (Get-DistributionGroup returns strings, not the
+  module's typed objects) — use the shape-dump probe pattern.
+- **Phase 3 (separate API):** `message-trace` / `message-trace-detail` use
+  Get-MessageTraceV2 which is NOT adminapi — it's the reporting API. Reverse-engineer
+  that endpoint separately; its own iteration.
+- **Perf:** `mailbox-sizes` stats each mailbox with its own REST call (107 at AM →
+  slow, ~minutes; within the 5-min job timeout). Candidate to batch/parallelize.
+- **UI confirm still owed:** the live click-through (connect Exchange, run
+  shared-mailboxes through Easy Auth) is unverified from here — Jim to confirm in the
+  browser. In-container logic is proven; only the authenticated HTTP path is untested.
 
-## Deploy — v12.1.4 LIVE (session 7)
+## Deploy — v12.1.5 LIVE (session 8)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
-- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.4` (+`latest`), rev
-  **`m365-admin-reports--0000008`**, Healthy, 100% traffic, 0 restarts. RG
+- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.5` (+`latest`), rev
+  **`m365-admin-reports--0000009`**, RunningAtMaxScale, 100% traffic. RG
   `rg-m365admin`, eastus2. min 0 / max 1.
 - Quick-roll: `az acr build --no-logs -r amm365acr -t m365-admin-reports:<v> -t
   m365-admin-reports:latest .` then `az containerapp update -n m365-admin-reports -g
   rg-m365admin --image …:<v>`.
 
-## Uncommitted changes (session 7 — awaiting commit)
-- `server.js` (orgDomain whitelist/entry + connect resolution), `public/index.html`
-  (orgDomain admin field + Exchange banner `appOnly`), `deploy/Grant-ExoAppOnlyRole.ps1`
-  (role-list/StrictMode/`-Device`), `package.json` (12.1.4), `CHANGELOG.md`, `docs/*`.
-- **Note:** the deployed rev `0000008` was built BEFORE the banner edit, so the live UI
-  still shows the old Exchange banner text; the fix lands with the next deploy.
-- Pre-existing uncommitted (from before session 7): `CHANGELOG.md`, `deploy/Grant-…`,
-  `package.json`, `public/index.html`, `server.js` were already modified at session start.
+## Commit status (session 7 — committed)
+- All of session 7's v12.1.4 code is committed on `main` @ `4870eaf`
+  ("feat: app-only Exchange orgDomain + grant hardening (v12.1.4)"): `server.js`,
+  `public/index.html`, `deploy/Grant-ExoAppOnlyRole.ps1`, `package.json`,
+  `CHANGELOG.md`, `docs/STATE.md`, `docs/DECISIONS.md`. Working tree clean.
+- **Deploy drift (still open):** the deployed rev `0000008` was built BEFORE the
+  banner edit, so the live UI still shows the old Exchange banner text; the fix
+  lands with the next deploy (the ADR-0011 work will redeploy anyway).
 
 ## Azure config that IS correct — leave alone
 - App `Exchange.ManageAsApp` consented; EXO SP registered (AppId 25407385… ↔ objectId

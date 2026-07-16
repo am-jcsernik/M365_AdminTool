@@ -1,6 +1,6 @@
 {
   "name": "m365-admin-reports",
-  "version": "12.1.4",
+  "version": "12.1.5",
   "description": "M365 Admin Read-Only Reports — Web UI with live PowerShell execution",
   "main": "server.js",
   "scripts": {

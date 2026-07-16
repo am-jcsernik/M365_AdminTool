@@ -5,6 +5,39 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-16 -- ADR-0012: ADR-0011 phase 1 implemented — adminapi InvokeCommand as the general EXO transport (v12.1.5)
+**Context:** Executing ADR-0011. ADR-0011 proved a raw entity GET
+(`adminapi/beta/{tid}/Mailbox`) returns 200 with an app-only token, but that path
+only covers simple entity sets — MailboxStatistics, InboxRule, DistributionGroupMember
+etc. are not entity GETs. Needed one transport that covers every read cmdlet.
+**Decision (proven in-container before writing any report code):**
+- **Transport = `POST adminapi/beta/{tid}/InvokeCommand`** with body
+  `{CmdletInput:{CmdletName, Parameters}}`. A probe confirmed it returns the same
+  `value[]` shape as the module and needs **no `X-AnchorMailbox` header** (bare works);
+  paging is via `@odata.nextLink` (GET continuations). This lets any EXO cmdlet run
+  over our own token with the module fully out of the path.
+- **Token** minted in-session by client-assertion (RS256 over the KV cert,
+  `scope=https://outlook.office365.com/.default`), cached on `$global:ExoRest` and
+  re-minted ~2 min before expiry. Helpers `Get-ExoRestToken` + `Invoke-ExoRest` are
+  defined **session-global at connect** (raw-mode dot-source persists them), so
+  reports built by `reports.js` just call `Invoke-ExoRest -Cmdlet <X> -Parameters @{}`.
+- **REST field-shape adjustments** (probed, not guessed): over REST `TotalItemSize`
+  is a display string `"1.4 GB (n bytes)"` (not the module's typed `ByteQuantified`),
+  so `mailbox-sizes` parses the parenthetical byte count for its sort; date/quota
+  fields come back as strings, so `.ToString()` calls were dropped.
+- **Phasing honored:** shipped phase 1 (the 4 mailbox reports) only; validated all
+  four end-to-end in the live container against 107 mailboxes, then deployed **v12.1.5**
+  (rev `--0000009`). Phases 2 (dl-members, inbox-rules, permissions, all-forwarding)
+  and 3 (message-trace — a separate reporting API, not adminapi) deferred.
+**Consequences:** App-only Exchange reporting works without the module — a stateless
+token + HTTPS call, consistent with the containerized model. `isSafe`'s block on
+`Invoke-RestMethod`/`Invoke-Command` is not tripped: report commands call only the
+`Invoke-ExoRest` helper; the raw REST lives in the connect script, which does not pass
+through `isSafe`. Cost/limitation: `mailbox-sizes` is O(mailboxes) sequential REST
+calls (slow at scale, within the 5-min job timeout for now). The authenticated HTTP
+click-through (connect + run via the Easy Auth UI) is still owed as a manual confirm;
+only the in-container logic is proven. Probes/validators kept under `deploy/`.
+
 ## 2026-07-16 -- ADR-0011: App-only Exchange blocked by a broken EXO module in the container — bypass it with direct REST calls
 **Context:** Completing app-only Exchange (the remaining v12 follow-up). Shipped
 v12.1.4 first: a per-tenant `orgDomain` field so `Connect-ExchangeOnline
