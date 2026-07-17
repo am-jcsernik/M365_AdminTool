@@ -63,11 +63,11 @@ data. No Exchange report remains on the module.
 - [x] **Committed.** Session 7's v12.1.4 code is committed on `main` @ `4870eaf`.
 
 ## NEXT SESSION should start by
-ADR-0011 is done; no Exchange-migration work remains. Open items:
-- **UI confirm still owed:** the live click-through through Easy Auth (connect
-  Exchange, run a report — incl. Message Trace with its `requireAny` gate — in the
-  browser) is unverified from here — Jim to confirm. In-container logic is proven for
-  all reports; only the authenticated HTTP path is untested.
+ADR-0011 is done and fully verified; no Exchange-migration work remains. Open items:
+- **UI click-through CONFIRMED (session 10, Jim).** Message Trace verified working in
+  the browser through Easy Auth — the `requireAny` gate and the app-only
+  `Invoke-ExoRest` path are proven on the authenticated HTTP path, not just
+  in-container. ADR-0011 is closed end-to-end.
 - **Perf (carried forward):** `all-forwarding-rules` and `mailbox-sizes` are
   per-mailbox serial REST loops (107 at AM → slow, ~minutes; within the 5-min job
   timeout). Candidate to batch/parallelize.
