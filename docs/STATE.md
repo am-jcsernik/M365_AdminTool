@@ -75,8 +75,8 @@ ADR-0011 is done; no Exchange-migration work remains. Open items:
 ## Deploy — v12.1.7 LIVE (session 10)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
 - Image `amm365acr.azurecr.io/m365-admin-reports:12.1.7` (+`latest`), rev
-  **`m365-admin-reports--PENDING`**, RG `rg-m365admin`, eastus2. min 0 / max 1.
-  _(rev filled in after the deploy step below completes.)_
+  **`m365-admin-reports--0000011`**, Healthy / RunningAtMaxScale, 100% traffic.
+  RG `rg-m365admin`, eastus2. min 0 / max 1.
 - Quick-roll: `az acr build --no-logs -r amm365acr -t m365-admin-reports:<v> -t
   m365-admin-reports:latest .` then `az containerapp update -n m365-admin-reports -g
   rg-m365admin --image …:<v>`.
