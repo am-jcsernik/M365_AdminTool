@@ -4,6 +4,33 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.2.0] — 2026-07-17
+
+### Added
+- **`Invoke-ExoRestBatch` — concurrent per-identity EXO fan-out.** A new
+  session-global helper in the app-only connect script (sibling to
+  `Invoke-ExoRest`) that runs one EXO cmdlet across many identities with bounded
+  concurrency (`ForEach-Object -Parallel`, default `-ThrottleLimit 8`), reusing a
+  single pre-minted token. Honors `Retry-After` on 429/5xx with a capped retry
+  loop. Lives in the connect script (not a report command) so it may call
+  `Invoke-RestMethod` directly without tripping the report read-only blocklist,
+  and sidesteps the fact that `-Parallel` runspaces don't inherit the global
+  `Invoke-ExoRest` / token state.
+
+### Changed
+- **`all-forwarding-rules` and `mailbox-sizes` now fan out in parallel.** Both
+  were serial per-mailbox REST loops (107 mailboxes at AM → ~minutes). They now
+  collect identities up front and hand them to `Invoke-ExoRestBatch`; result
+  shaping (rule-name cleaning, size parsing, top-50 sort) stays in the parent, so
+  the `$clean` scriptblock no longer crosses a runspace boundary. Expected
+  wall-clock roughly `serial ÷ throttle` minus throttling.
+- **No more silently-dropped mailboxes.** `all-forwarding-rules` previously did
+  `catch{continue}`, so a transient per-mailbox error dropped that mailbox from
+  the audit with no trace. Failures now surface as a row
+  (`Rule='(scan failed)'`, the error in `ForwardTo`) so an incomplete scan is
+  visible. `mailbox-sizes` skips failed stats (as before) but the failure is no
+  longer masked at the transport layer.
+
 ## [12.1.7] — 2026-07-17
 
 ### Fixed

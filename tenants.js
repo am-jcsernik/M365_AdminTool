@@ -126,6 +126,63 @@ function global:Invoke-ExoRest {
   return $acc.ToArray()
 }
 
+function global:Invoke-ExoRestBatch {
+  # Fan one EXO cmdlet across many identities concurrently, reusing a single
+  # pre-minted token. Bounded concurrency + Retry-After backoff. Nothing is
+  # silently dropped: a per-identity failure is returned as an object carrying
+  # _Identity + _Error, and every success row is tagged with _Identity so the
+  # caller can map results back. Runs in the connect script (not a report
+  # command) so it may use Invoke-RestMethod directly.
+  # NOTE: the token is captured once for the whole batch (parallel runspaces
+  # can't refresh it); safe because a full-tenant fan-out finishes well inside
+  # the ~60-min token lifetime.
+  param(
+    [Parameter(Mandatory)][string]$Cmdlet,
+    [Parameter(Mandatory)][string[]]$Identities,
+    [hashtable]$Common = @{},
+    [string]$IdentityParam = 'Identity',
+    [int]$ThrottleLimit = 8
+  )
+  if (-not $Identities -or $Identities.Count -eq 0) { return @() }
+  $tid = $global:ExoRest.Tid
+  $tok = Get-ExoRestToken   # mint/refresh once, in the parent runspace
+  $uri = "https://outlook.office365.com/adminapi/beta/$tid/InvokeCommand"
+  $Identities | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
+    $id = [string]$_
+    $endpoint = $using:uri; $tok = $using:tok; $cmd = $using:Cmdlet
+    $common = $using:Common; $idp = $using:IdentityParam
+    $params = @{}; foreach ($k in $common.Keys) { $params[$k] = $common[$k] }
+    $params[$idp] = $id
+    $headers = @{ Authorization = "Bearer $tok"; Accept = 'application/json' }
+    $body = @{ CmdletInput = @{ CmdletName = $cmd; Parameters = $params } } | ConvertTo-Json -Depth 8
+    $acc = [System.Collections.Generic.List[object]]::new()
+    $curUri = $endpoint; $method = 'POST'; $b = $body; $attempt = 0; $guard = 0
+    while ($curUri -and $guard -lt 500) {
+      $guard++
+      try {
+        $r = Invoke-RestMethod -Method $method -Uri $curUri -Headers $headers -Body $b -ContentType 'application/json'
+      } catch {
+        $status = 0; try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+        if (($status -eq 429 -or $status -ge 500) -and $attempt -lt 5) {
+          $attempt++
+          $wait = 10
+          try { $d = $_.Exception.Response.Headers.RetryAfter.Delta; if ($d) { $wait = [int]$d.Value.TotalSeconds } } catch {}
+          if ($wait -lt 1) { $wait = 5 }
+          Start-Sleep -Seconds $wait
+          continue   # retry the same request (method/body unchanged)
+        }
+        $msg = $_.Exception.Message
+        try { if ($_.ErrorDetails.Message) { $msg = $_.ErrorDetails.Message } } catch {}
+        $acc.Add([PSCustomObject]@{ _Identity = $id; _Error = $msg })
+        break
+      }
+      if ($r.value) { foreach ($v in $r.value) { $v | Add-Member -NotePropertyName _Identity -NotePropertyValue $id -Force; $acc.Add($v) } }
+      $curUri = $r.'@odata.nextLink'; $method = 'GET'; $b = $null
+    }
+    $acc.ToArray()
+  }
+}
+
 # Verify connectivity with a cheap call before declaring connected.
 $__org = @(Invoke-ExoRest -Cmdlet Get-OrganizationConfig -Parameters @{})
 [PSCustomObject]@{ status='connected'; mode='app-only-rest'; org=$(if($__org.Count){$__org[0].Name}else{$global:ExoRest.Org}); via='adminapi' } | ConvertTo-Json -Compress | Out-File -FilePath '__OUTFILE__' -Encoding utf8`;

@@ -1,5 +1,5 @@
 # Project State
-_Last updated: 2026-07-17 -- session 10_
+_Last updated: 2026-07-17 -- session 11_
 
 > **Authorization context (read first):** This project administers Jim's *own*
 > M365 tenant (`am.consulting`), where he is Director of Technology and authorized
@@ -23,6 +23,23 @@ message-trace-detail) — each validated end-to-end in the live container agains
 data. No Exchange report remains on the module.
 
 ## Status
+- [x] **Perf batching SHIPPED (v12.2.0, session 11) — live on rev `--0000012`.**
+      New session-global helper `Invoke-ExoRestBatch` in `tenants.js`
+      `buildExchangeAppOnlyConnect` fans one EXO cmdlet across many identities via
+      `ForEach-Object -Parallel` (default `-ThrottleLimit 8`), reusing one
+      pre-minted token, with `Retry-After` backoff on 429/5xx. Placed in the
+      connect script (not a report command) because the report blocklist forbids
+      `Invoke-RestMethod` and `-Parallel` runspaces don't inherit the global
+      `Invoke-ExoRest`/token. `reports.js` `all-forwarding-rules` and
+      `mailbox-sizes` rewritten to collect identities then call the batch helper;
+      shaping stays in the parent (so `$clean` doesn't cross a runspace). Also
+      fixed a silent-drop: `all-forwarding-rules` no longer `catch{continue}`s —
+      per-mailbox failures surface as a `(scan failed)` row. Tests 22/22, lint
+      (incl. PS AST) + lint:copy green. **Validated live in-container**
+      (`deploy/validate-perf-batch.ps1`): 107 mailboxes, sample 20 serial 35.0s →
+      parallel 8.5s (4.1×); full mailbox-sizes 31.4s (107/107, 0 err), full
+      all-forwarding-rules 40.1s (352 rules, 28 fwd hits, 0 err). No 429s at
+      throttle 8; both reports now finish <1min vs. ~3min serial.
 - [x] **Phase 3 SHIPPED (v12.1.7, session 10) — ADR-0011 complete.** Transport probe
       (`deploy/probe-messagetrace.ps1`) proved `Get-MessageTraceV2`/`Get-MessageTraceDetailV2`
       run over the same `adminapi InvokeCommand` surface (the "separate reporting API"
@@ -68,14 +85,16 @@ ADR-0011 is done and fully verified; no Exchange-migration work remains. Open it
   the browser through Easy Auth — the `requireAny` gate and the app-only
   `Invoke-ExoRest` path are proven on the authenticated HTTP path, not just
   in-container. ADR-0011 is closed end-to-end.
-- **Perf (carried forward):** `all-forwarding-rules` and `mailbox-sizes` are
-  per-mailbox serial REST loops (107 at AM → slow, ~minutes; within the 5-min job
-  timeout). Candidate to batch/parallelize.
+- **Perf (v12.2.0 SHIPPED, session 11):** `all-forwarding-rules` and
+  `mailbox-sizes` migrated off serial per-mailbox loops onto the parallel
+  `Invoke-ExoRestBatch` helper; validated live (4–6× faster, 0 errors, no 429s at
+  throttle 8). If future throttling ever appears, lower the helper's default
+  `-ThrottleLimit`. Nothing else outstanding on this item.
 
-## Deploy — v12.1.7 LIVE (session 10)
+## Deploy — v12.2.0 LIVE (session 11)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
-- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.7` (+`latest`), rev
-  **`m365-admin-reports--0000011`**, Healthy / RunningAtMaxScale, 100% traffic.
+- Image `amm365acr.azurecr.io/m365-admin-reports:12.2.0` (+`latest`), rev
+  **`m365-admin-reports--0000012`**, RunningAtMaxScale, 100% traffic.
   RG `rg-m365admin`, eastus2. min 0 / max 1.
 - Quick-roll: `az acr build --no-logs -r amm365acr -t m365-admin-reports:<v> -t
   m365-admin-reports:latest .` then `az containerapp update -n m365-admin-reports -g
@@ -105,6 +124,18 @@ ADR-0011 is done and fully verified; no Exchange-migration work remains. Open it
   `az storage account keys list -n amm365data`) and run once with `pwsh -File
   /app/data/x.ps1`, writing results to `/app/data/*.out` to download. minReplicas=0 →
   `/tmp` + staged certs vanish on scale-down.
+
+## Parked ideas (not scheduled)
+- **Message Trace → content drill-through via `Mail.Read`.** Add a per-row "view
+  message content" action that pivots from a trace result into the actual body +
+  attachments through Graph. Design sketched (session 11): join is
+  trace `MessageId` → Graph `internetMessageId` `$filter` → item `id` → `GET
+  body`/`attachments`; query the tenant-side mailbox (recipient inbound / sender
+  outbound); gate the action to status ∈ {Delivered} (Failed/Quarantined have no
+  mailbox item). **Open decision:** containment layer for the tenant-wide
+  `Mail.Read` app grant — EXO **RBAC for Applications** (modern, preferred) vs
+  **Application Access Policy** vs lean on logging + app-side RBAC. Would be a new
+  ADR (follow-on to ADR-0011) before any code. Tabled per Jim, session 11.
 
 ## Manual follow-ups still open (unchanged)
 - Group-claim overage `memberOf` fallback in `auth.js` — not built, not yet hit.

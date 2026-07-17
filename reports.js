@@ -61,18 +61,23 @@ $members|Select-Object DisplayName,PrimarySmtpAddress,Alias,RecipientType,@{N='D
   {id:"mail-forwarding",name:"Mailbox Forwarding",desc:"Server-side forwarding configured",ex:true,command:`Invoke-ExoRest -Cmdlet Get-Mailbox -Parameters @{ResultSize='Unlimited'}|Where-Object{$_.ForwardingAddress -or $_.ForwardingSmtpAddress}|Select-Object DisplayName,PrimarySmtpAddress,ForwardingAddress,ForwardingSmtpAddress,DeliverToMailboxAndForward`,tags:["forwarding"]},
   {id:"user-inbox-rules",name:"User Inbox Rules",desc:"All inbox rules for a user (forwarding, redirect, delete)",ex:true,command:`$clean={param($a) ($a|ForEach-Object{if($_ -match '^"([^"]+)"'){$Matches[1]}else{$_}}) -join '; '}
 @(Invoke-ExoRest -Cmdlet Get-InboxRule -Parameters @{Mailbox='<UPN>'})|Select-Object Name,Enabled,Priority,@{N='ForwardTo';E={& $clean $_.ForwardTo}},@{N='RedirectTo';E={& $clean $_.RedirectTo}},@{N='ForwardAsAttach';E={& $clean $_.ForwardAsAttachmentTo}},DeleteMessage,MoveToFolder`,tags:["inbox","rules"],params:[{key:"UPN",label:"User",picker:"users"}]},
-  {id:"all-forwarding-rules",name:"All Forwarding Rules (Tenant)",desc:"Scan all mailboxes for forward/redirect rules \u2014 SLOW",ex:true,command:`$clean={param($a) ($a|ForEach-Object{if($_ -match '^"([^"]+)"'){$Matches[1]}else{$_}}) -join '; '}
-$mbxs=@(Invoke-ExoRest -Cmdlet Get-Mailbox -Parameters @{ResultSize='Unlimited'}|Select-Object PrimarySmtpAddress)
-foreach($m in $mbxs){try{$rules=@(Invoke-ExoRest -Cmdlet Get-InboxRule -Parameters @{Mailbox=$m.PrimarySmtpAddress})}catch{continue};$rules|Where-Object{$_.ForwardTo -or $_.ForwardAsAttachmentTo -or $_.RedirectTo}|ForEach-Object{[PSCustomObject]@{Mailbox=$m.PrimarySmtpAddress;Rule=$_.Name;Enabled=$_.Enabled;ForwardTo=(& $clean $_.ForwardTo);Redirect=(& $clean $_.RedirectTo)}}}`,tags:["forwarding","audit"]},
+  {id:"all-forwarding-rules",name:"All Forwarding Rules (Tenant)",desc:"Scan all mailboxes for forward/redirect rules \u2014 parallel",ex:true,command:`$clean={param($a) ($a|ForEach-Object{if($_ -match '^"([^"]+)"'){$Matches[1]}else{$_}}) -join '; '}
+$mbxs=@(Invoke-ExoRest -Cmdlet Get-Mailbox -Parameters @{ResultSize='Unlimited'}|Select-Object -ExpandProperty PrimarySmtpAddress)
+$raw=@(Invoke-ExoRestBatch -Cmdlet Get-InboxRule -Identities $mbxs -IdentityParam 'Mailbox')
+$raw|ForEach-Object{
+  if($_._Error){[PSCustomObject]@{Mailbox=$_._Identity;Rule='(scan failed)';Enabled=$false;ForwardTo=$_._Error;Redirect=''}}
+  elseif($_.ForwardTo -or $_.ForwardAsAttachmentTo -or $_.RedirectTo){[PSCustomObject]@{Mailbox=$_._Identity;Rule=$_.Name;Enabled=$_.Enabled;ForwardTo=(& $clean $_.ForwardTo);Redirect=(& $clean $_.RedirectTo)}}
+}`,tags:["forwarding","audit"]},
   {id:"mailbox-permissions",name:"Mailbox Permissions",desc:"Full access and send-as delegates",ex:true,command:`$mbx="<UPN>"\n$fa=@(Invoke-ExoRest -Cmdlet Get-MailboxPermission -Parameters @{Identity=$mbx})|Where-Object{$_.User -ne 'NT AUTHORITY\\SELF' -and -not $_.IsInherited -and $_.Deny -ne 'True'}|Select-Object @{N='Mailbox';E={$mbx}},User,@{N='Rights';E={$_.AccessRights -join ', '}},@{N='Type';E={'FullAccess'}}\n$sa=@(Invoke-ExoRest -Cmdlet Get-RecipientPermission -Parameters @{Identity=$mbx})|Where-Object{$_.Trustee -ne 'NT AUTHORITY\\SELF'}|Select-Object @{N='Mailbox';E={$mbx}},@{N='User';E={$_.Trustee}},@{N='Rights';E={'SendAs'}},@{N='Type';E={'SendAs'}}\n@($fa)+@($sa)|Where-Object{$_}`,tags:["permissions"],params:[{key:"UPN",label:"Mailbox",picker:"users"}]},
-  {id:"mailbox-sizes",name:"Mailbox Sizes (Top 50)",desc:"Largest mailboxes",ex:true,command:`$mbx=Invoke-ExoRest -Cmdlet Get-Mailbox -Parameters @{ResultSize='Unlimited'}
-$rows=foreach($m in $mbx){
-  $st=@(Invoke-ExoRest -Cmdlet Get-MailboxStatistics -Parameters @{Identity=$m.PrimarySmtpAddress})
-  if($st.Count){
-    $sz=$st[0].TotalItemSize
-    $bytes=0;if($sz -and ($sz -match '\\(([\\d,]+) bytes\\)')){$bytes=[int64]($Matches[1] -replace ',','')}
-    [PSCustomObject]@{DisplayName=$m.DisplayName;TotalSize=$sz;ItemCount=$st[0].ItemCount;__Bytes=$bytes}
-  }
+  {id:"mailbox-sizes",name:"Mailbox Sizes (Top 50)",desc:"Largest mailboxes",ex:true,command:`$mbx=@(Invoke-ExoRest -Cmdlet Get-Mailbox -Parameters @{ResultSize='Unlimited'})
+$ids=@($mbx|Select-Object -ExpandProperty PrimarySmtpAddress)
+$dn=@{};foreach($m in $mbx){$dn[[string]$m.PrimarySmtpAddress]=$m.DisplayName}
+$stats=@(Invoke-ExoRestBatch -Cmdlet Get-MailboxStatistics -Identities $ids)
+$rows=foreach($s in $stats){
+  if($s._Error){continue}
+  $sz=$s.TotalItemSize
+  $bytes=0;if($sz -and ($sz -match '\\(([\\d,]+) bytes\\)')){$bytes=[int64]($Matches[1] -replace ',','')}
+  [PSCustomObject]@{DisplayName=$dn[[string]$s._Identity];TotalSize=$sz;ItemCount=$s.ItemCount;__Bytes=$bytes}
 }
 $rows|Sort-Object __Bytes -Descending|Select-Object -First 50 DisplayName,TotalSize,ItemCount`,tags:["size"]},
   {id:"user-mailbox",name:"Mailbox Report (User)",desc:"Type, size, quotas, archive, litigation hold and forwarding for one mailbox",ex:true,command:`$u="<UPN>"
