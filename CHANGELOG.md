@@ -4,6 +4,33 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.3.0] — 2026-07-17
+
+### Added
+- **Global Administrators are tool admins (via the `wids` claim).** In-tool admin
+  can now be conferred by an Entra directory role — Global Administrator by
+  default, extendable via the `ADMIN_ROLE_IDS` env (comma-separated
+  roleTemplateIds). This rides the token's `wids` claim, which is *independent* of
+  the `groups` claim, so a Global Admin retains admin even if group claims break
+  or overflow (group overage) — a recovery path that admin-group membership alone
+  didn't provide. Strictly additive: it only adds ways to be admin.
+- **`/api/config` echoes the caller's own identity** as `me: { upn, adminVia }`
+  (own identity only — no leak), where `adminVia` lists which signals granted
+  admin (`local-dev` / `admin-group` / `global-admin-role`). Lets the Global-Admin
+  path be confirmed live in-browser.
+
+### Changed
+- Admin resolution in `auth.js` is now `local-dev OR admin-group OR admin
+  directory role` (previously admin-group only). The decoded principal now also
+  carries `roles` (the `wids` values).
+
+### Notes
+- Ratified two open items with no code change (see ADR-0016): the bootstrap
+  access group staying optional/empty by design, and min-replicas remaining 0.
+- The originally-planned Graph `/memberOf` group-overage fallback is intentionally
+  not built — not needed at this tenant's scale; the `wids` admin path addresses
+  the real lockout risk.
+
 ## [12.2.0] — 2026-07-17
 
 ### Added

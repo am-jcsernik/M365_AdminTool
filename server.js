@@ -812,7 +812,13 @@ app.get("/api/config", (req, res) => {
     .map(t => ({ id: t.id, name: t.name, tenantId: t.tenantId }));
   // admin flag drives whether the client renders the admin (access-control) UI;
   // every admin route is independently server-gated by requireAdmin regardless.
-  res.json({ tenants, admin: rbac.isAdmin(req.user, store) });
+  // `me` echoes only the caller's OWN resolved identity (no leak) so the admin
+  // signal path — notably Global Admin via the wids claim — can be confirmed live.
+  res.json({
+    tenants,
+    admin: rbac.isAdmin(req.user, store),
+    me: { upn: req.user.upn || null, adminVia: req.user.adminVia || [] },
+  });
 });
 app.get("/api/audit", requireAdmin, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);

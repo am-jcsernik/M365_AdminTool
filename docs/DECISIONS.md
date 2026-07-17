@@ -5,6 +5,58 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-17 -- ADR-0016: Global Admins are tool admins (wids); access-group + min-replicas ratified (v12.3.0)
+**Context:** Three v12 follow-ups were open: (1) a group-claim overage
+`memberOf` fallback in `auth.js` (detected via `groupsOverage` but never
+consumed); (2) the bootstrap access group `197dd092…` is empty; (3) min-replicas
+0-vs-1. Underlying (1) is a real fragility already hit once (see memory
+"v12-admin-lockout"): in-tool admin depended **solely** on the `groups` claim, so
+any group-claim breakage (overage, Easy Auth reconfig) locks the operator out of
+their own admin tool.
+**Decision:**
+- **(1) Confer admin from the Global Administrator directory role, via the token's
+  `wids` claim** — a claim *independent* of `groups`, so it survives group-claim
+  breakage and needs no per-user config. `auth.js` now grants admin on any of:
+  local-dev, admin-group membership, OR an admin directory role (Global Admin by
+  default; extend via `ADMIN_ROLE_IDS`). Strictly **additive** — cannot lock out
+  anyone with access today. `/api/config` now echoes the caller's own
+  `me.adminVia` so the `wids` path is confirmable live. The originally-planned
+  Graph `/memberOf` overage fallback is **deliberately not built** — genuine
+  overage (>150 groups/user) won't occur at AM's scale, and the `wids` recovery
+  path addresses the actual risk more cheaply.
+- **(2) Keep the access-group gate as optional; the empty group is intentional.**
+  `hasToolAccess` is `admin OR access-group OR any-role-assignment`; an empty
+  access group is an inert `false` in that OR, and real users are gated by role
+  assignments. No code change.
+- **(3) Ratify min-replicas 0.** Cold start is a few seconds and certs re-stage
+  from Key Vault every session, so the scale-to-zero `/tmp` wipe is a non-issue.
+  For an occasional-use personal admin tool, zero idle cost wins. Revisit only if
+  cold-start latency becomes annoying or a scheduled job needs a warm replica.
+**Consequences:** Ships as **v12.3.0**. Tests 24/24 (added a `wids`-admin path
+test + a non-admin-role negative). Additive auth change → safe to deploy. Live
+confirmation that Easy Auth forwards `wids`: check `me.adminVia` on `/api/config`
+in-browser (should include `global-admin-role` for a Global Admin).
+
+## 2026-07-17 -- ADR-0015: parallel EXO fan-out for tenant-wide reports (v12.2.0)
+**Context:** `all-forwarding-rules` and `mailbox-sizes` were serial per-mailbox
+REST loops — ~minutes at AM's 107 mailboxes (within, but near, the 5-min job
+timeout). Carried as a perf follow-up since ADR-0011.
+**Decision:**
+- **Add `Invoke-ExoRestBatch` to the app-only connect script** (`tenants.js`):
+  fans one EXO cmdlet across many identities via `ForEach-Object -Parallel`
+  (default `-ThrottleLimit 8`), reusing one pre-minted token, with `Retry-After`
+  backoff on 429/5xx and per-identity `_Error` tagging.
+- **Why the connect script, not a report command:** the report read-only
+  blocklist forbids `Invoke-RestMethod`, and `-Parallel` runspaces don't inherit
+  the global `Invoke-ExoRest`/token. The helper is vetted connect-script code.
+- **Rewrote both reports** to collect identities then call the helper; shaping
+  stays in the parent so `$clean` never crosses a runspace. Also removed a
+  silent-drop (`catch{continue}`) — failures now surface as a `(scan failed)` row.
+**Consequences:** Ships as **v12.2.0**, live on rev `--0000012`. Validated
+in-container (`deploy/validate-perf-batch.ps1`): 4–6× faster, 0 errors, no 429s at
+throttle 8; both reports now finish <1min. If throttling ever appears, lower the
+default `-ThrottleLimit`.
+
 ## 2026-07-17 -- ADR-0014: ADR-0011 phase 3 implemented — message-trace over adminapi; ADR-0011 complete (v12.1.7)
 **Context:** ADR-0011 assumed `message-trace` / `message-trace-detail` needed a
 *separate* reporting API (`reports.office365.com` / Graph reports), deferred as a

@@ -91,11 +91,15 @@ ADR-0011 is done and fully verified; no Exchange-migration work remains. Open it
   throttle 8). If future throttling ever appears, lower the helper's default
   `-ThrottleLimit`. Nothing else outstanding on this item.
 
-## Deploy — v12.2.0 LIVE (session 11)
+## Deploy — v12.3.0 LIVE (session 11)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
-- Image `amm365acr.azurecr.io/m365-admin-reports:12.2.0` (+`latest`), rev
-  **`m365-admin-reports--0000012`**, RunningAtMaxScale, 100% traffic.
+- Image `amm365acr.azurecr.io/m365-admin-reports:12.3.0` (+`latest`), rev
+  **`m365-admin-reports--0000013`**, RunningAtMaxScale, 100% traffic.
   RG `rg-m365admin`, eastus2. min 0 / max 1.
+- **Live confirm still to do (Jim, in-browser):** open `/api/config` (or the
+  admin UI) and check `me.adminVia` includes `global-admin-role` -- proves Easy
+  Auth forwards the `wids` claim and the Global-Admin path fires. Additive change,
+  so no lockout risk if it doesn't (admin-group path still works).
 - Quick-roll: `az acr build --no-logs -r amm365acr -t m365-admin-reports:<v> -t
   m365-admin-reports:latest .` then `az containerapp update -n m365-admin-reports -g
   rg-m365admin --image …:<v>`.
@@ -137,7 +141,14 @@ ADR-0011 is done and fully verified; no Exchange-migration work remains. Open it
   **Application Access Policy** vs lean on logging + app-side RBAC. Would be a new
   ADR (follow-on to ADR-0011) before any code. Tabled per Jim, session 11.
 
-## Manual follow-ups still open (unchanged)
-- Group-claim overage `memberOf` fallback in `auth.js` — not built, not yet hit.
-- Access group `197dd092` empty — decide gate strategy vs role-assignment entry.
-- Decide min-replicas (0 vs 1).
+## Follow-ups — RESOLVED session 11 (see ADR-0016)
+- **Admin lockout / group-overage (v12.3.0):** replaced the planned Graph
+  `/memberOf` fallback with a stronger, cheaper fix — Global Admins are tool
+  admins via the `wids` claim (independent of `groups`, so it survives group-claim
+  breakage). `ADMIN_ROLE_IDS` env extends the qualifying roles. `/api/config`
+  echoes `me.adminVia` for live confirmation. The Graph overage fallback is
+  intentionally NOT built (unneeded at AM scale).
+- **Access group `197dd092` empty:** ratified as optional/intentional — inert in
+  the `hasToolAccess` OR; real users gated by role assignments. No code.
+- **min-replicas 0 vs 1:** ratified min 0 (cold start ~seconds, certs re-stage
+  from KV; zero idle cost). No code.

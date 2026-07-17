@@ -23,11 +23,16 @@ const path = require("node:path");
 
 const ADMIN_GROUP = "11111111-1111-1111-1111-111111111111";
 const ACCESS_GROUP = "22222222-2222-2222-2222-222222222222";
+const GLOBAL_ADMIN_WID = "62e90394-69f5-4237-9190-012177145e10"; // Entra Global Administrator
 
 // Forge an Easy Auth principal blob the way auth.js decodes it: a base64 JSON
-// object with a `claims` array (upn + one claim per group).
-function principalHeaders({ upn, groups = [] }) {
-  const claims = [{ typ: "preferred_username", val: upn }, ...groups.map(g => ({ typ: "groups", val: g }))];
+// object with a `claims` array (upn + one claim per group + one `wids` per role).
+function principalHeaders({ upn, groups = [], wids = [] }) {
+  const claims = [
+    { typ: "preferred_username", val: upn },
+    ...groups.map(g => ({ typ: "groups", val: g })),
+    ...wids.map(w => ({ typ: "wids", val: w })),
+  ];
   const b64 = Buffer.from(JSON.stringify({ claims }), "utf8").toString("base64");
   return { "x-ms-client-principal": b64, "x-ms-client-principal-name": upn };
 }
@@ -122,6 +127,19 @@ describe("v12 RBAC guard matrix", () => {
   test("Easy Auth admin (admin group) reaches admin routes", async () => {
     const r = await api("GET", "/api/admin/store", { as: { upn: "boss@am.consulting", groups: [ADMIN_GROUP] } });
     assert.equal(r.status, 200);
+  });
+
+  test("Global Administrator (wids) is a tool admin without any group membership", async () => {
+    const as = { upn: "ga@am.consulting", groups: [], wids: [GLOBAL_ADMIN_WID] };
+    assert.equal((await api("GET", "/api/admin/store", { as })).status, 200);
+    const cfg = await api("GET", "/api/config", { as });
+    assert.equal(cfg.json.admin, true);
+    assert.deepEqual(cfg.json.me.adminVia, ["global-admin-role"], "admin conferred by the role, not a group");
+  });
+
+  test("a non-admin directory role (wids) does not confer tool admin", async () => {
+    const as = { upn: "helpdesk@am.consulting", groups: [], wids: ["88888888-8888-8888-8888-888888888888"] };
+    assert.equal((await api("GET", "/api/admin/store", { as })).status, 403);
   });
 
   test("no-access identity is denied everything but health (403)", async () => {
