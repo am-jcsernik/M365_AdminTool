@@ -5,6 +5,36 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-17 -- ADR-0014: ADR-0011 phase 3 implemented — message-trace over adminapi; ADR-0011 complete (v12.1.7)
+**Context:** ADR-0011 assumed `message-trace` / `message-trace-detail` needed a
+*separate* reporting API (`reports.office365.com` / Graph reports), deferred as a
+meatier lift. Meanwhile the two reports still called `Get-MessageTrace(V2)` /
+`Get-MessageTraceDetail(V2)` as **module** cmdlets via `Get-Command`, but the
+app-only connect no longer imports `ExchangeOnlineManagement` — so they died with
+"The term 'Get-MessageTrace' is not recognized."
+**Decision (probed in-container before touching report code):**
+- **Ran a read-only transport probe** (`deploy/probe-messagetrace.ps1`): both
+  `Get-MessageTraceV2` and `Get-MessageTraceDetailV2` run fine over the **same
+  `adminapi InvokeCommand` surface** as every other EXO cmdlet. The
+  "separate reporting API" assumption was wrong — no second endpoint needed.
+- **Rewrote both reports onto `Invoke-ExoRest`** (`reports.js`): dates passed as ISO
+  strings, `ResultSize` capped at 5000; `message-trace-detail` chains off a row's
+  `MessageTraceId` + `RecipientAddress`. Validated end-to-end in the live container
+  (`deploy/validate-messagetrace.ps1`) against real AM mail flow.
+- **Dropped the legacy V1 `Get-MessageTrace` fallback** — over `adminapi` it now
+  hard-errors server-side (deprecating since 2025-09-01; use V2).
+- **Added a `requireAny` report gate** (report schema + `public/index.html`): a report
+  can set `requireAny:true` to block Run until at least one optional parameter has a
+  value. Applied to Message Trace so an all-optional report can't be run wide open;
+  Run stays disabled with a hint until a filter is set. (`message-trace-detail` was
+  already gated by its required `MessageTraceId`.)
+**Consequences:** **ADR-0011 is complete — every Exchange report now runs app-only
+over `adminapi`, the `ExchangeOnlineManagement` module is fully out of the path.**
+Ships as **v12.1.7**. Perf note still carried: `all-forwarding-rules` and
+`mailbox-sizes` are per-mailbox serial REST loops (candidate to batch). The
+authenticated Easy-Auth click-through remains a manual confirm; in-container logic is
+proven for all reports.
+
 ## 2026-07-17 -- ADR-0013: ADR-0011 phase 2 implemented — the last module-based Exchange reports moved to adminapi (v12.1.6)
 **Context:** Phase 1 (ADR-0012) proved `Invoke-ExoRest` as a general EXO transport
 and migrated the four mailbox reports. Four reports still called the broken

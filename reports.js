@@ -91,17 +91,15 @@ try{$end=if($endRaw){[datetime]$endRaw}else{Get-Date}}catch{[PSCustomObject]@{Re
 try{$start=if($startRaw){[datetime]$startRaw}else{$end.AddDays(-2)}}catch{[PSCustomObject]@{Result='ERROR';Error="Could not parse Start '$startRaw' \u2014 use e.g. 2026-07-01 or 2026-07-01T14:30."};return}
 if($start -gt $end){[PSCustomObject]@{Result='ERROR';Error='Start date is after End date.'};return}
 if(($end-$start).TotalDays -gt 10){[PSCustomObject]@{Result='ERROR';Error='Message trace allows at most a 10-day window per query. Narrow the date range (historical search beyond 10 days is a planned follow-up).'};return}
-$filters=@{StartDate=$start;EndDate=$end}
+$filters=@{StartDate=$start.ToString('yyyy-MM-ddTHH:mm:ss');EndDate=$end.ToString('yyyy-MM-ddTHH:mm:ss');ResultSize=5000}
 if($sndr){$filters['SenderAddress']=$sndr}
 if($rcpt){$filters['RecipientAddress']=$rcpt}
 if($status){$filters['Status']=$status}
-$useV2=[bool](Get-Command Get-MessageTraceV2 -ErrorAction SilentlyContinue)
-try{if($useV2){$rows=Get-MessageTraceV2 @filters -ResultSize 5000 -ErrorAction Stop}else{$rows=Get-MessageTrace @filters -PageSize 5000 -Page 1 -ErrorAction Stop}}catch{[PSCustomObject]@{Result='ERROR';Error=$_.Exception.Message;Hint='Message trace runs over the Exchange connection \u2014 make sure Exchange is connected. The live trace covers the last ~10 days (Get-MessageTrace) or up to 90 days in 10-day windows (Get-MessageTraceV2). Older data needs Start-HistoricalSearch (planned follow-up).'};return}
-$rows=@($rows)
-if($rows.Count -eq 0){[PSCustomObject]@{Result='No messages matched';Cmdlet=$(if($useV2){'Get-MessageTraceV2'}else{'Get-MessageTrace'});Window="$($start.ToString('yyyy-MM-dd HH:mm')) to $($end.ToString('yyyy-MM-dd HH:mm'))";Hint='Widen the window or relax the sender/recipient/status filters. Very recent mail can take a few minutes to appear in the trace.'};return}
+try{$rows=@(Invoke-ExoRest -Cmdlet Get-MessageTraceV2 -Parameters $filters)}catch{[PSCustomObject]@{Result='ERROR';Error=$_.Exception.Message;Hint='Message trace runs app-only over Get-MessageTraceV2 (adminapi InvokeCommand). The live trace covers up to ~10 days per query; older data needs Start-HistoricalSearch (planned follow-up).'};return}
+if($rows.Count -eq 0){[PSCustomObject]@{Result='No messages matched';Cmdlet='Get-MessageTraceV2';Window="$($start.ToString('yyyy-MM-dd HH:mm')) to $($end.ToString('yyyy-MM-dd HH:mm'))";Hint='Widen the window or relax the sender/recipient/status filters. Very recent mail can take a few minutes to appear in the trace.'};return}
 $out=$rows|Select-Object @{N='Received';E={$_.Received}},@{N='Sender';E={$_.SenderAddress}},@{N='Recipient';E={$_.RecipientAddress}},@{N='Subject';E={$_.Subject}},@{N='Status';E={$_.Status}},@{N='FromIP';E={$_.FromIP}},@{N='ToIP';E={$_.ToIP}},@{N='SizeKB';E={if($_.Size){[math]::Round([long]$_.Size/1KB,1)}else{$null}}},@{N='MessageId';E={$_.MessageId}},@{N='MessageTraceId';E={$_.MessageTraceId}}
 $out
-if($rows.Count -ge 5000){[PSCustomObject]@{Received='';Sender='(results capped at 5000 rows)';Recipient='Narrow the date window or add a sender/recipient filter to retrieve the rest.';Subject='';Status='';FromIP='';ToIP='';SizeKB='';MessageId='';MessageTraceId=''}}`,tags:["message","trace","mailflow","email","delivery","messagetrace","messagetracev2"],params:[
+if($rows.Count -ge 5000){[PSCustomObject]@{Received='';Sender='(results capped at 5000 rows)';Recipient='Narrow the date window or add a sender/recipient filter to retrieve the rest.';Subject='';Status='';FromIP='';ToIP='';SizeKB='';MessageId='';MessageTraceId=''}}`,tags:["message","trace","mailflow","email","delivery","messagetrace","messagetracev2"],requireAny:true,params:[
     {key:"Sender",label:"Sender address (optional)",placeholder:"someone@contoso.com",optional:true},
     {key:"Recipient",label:"Recipient address (optional)",placeholder:"someone@contoso.com",optional:true},
     {key:"Start",label:"Start (optional \u2014 defaults to 48h ago)",type:"datetime",optional:true},
@@ -111,9 +109,7 @@ if($rows.Count -ge 5000){[PSCustomObject]@{Received='';Sender='(results capped a
   {id:"message-trace-detail",name:"Message Trace Detail",desc:"Per-hop delivery events (RECEIVE, SEND, DELIVER, FAIL, etc.) for a single message. Click a row in Message Trace to drill in, or paste a Message-Trace-ID and recipient here directly. Uses Get-MessageTraceDetailV2 when available, else Get-MessageTraceDetail.",ex:true,command:`$mtid='<MessageTraceId>'
 $rcpt='<RecipientAddress>'
 if(-not $mtid){[PSCustomObject]@{Result='ERROR';Error='MessageTraceId is required (get it from a Message Trace row).'};return}
-$useV2=[bool](Get-Command Get-MessageTraceDetailV2 -ErrorAction SilentlyContinue)
-try{if($useV2){$rows=Get-MessageTraceDetailV2 -MessageTraceId $mtid -RecipientAddress $rcpt -ErrorAction Stop}else{$rows=Get-MessageTraceDetail -MessageTraceId $mtid -RecipientAddress $rcpt -ErrorAction Stop}}catch{[PSCustomObject]@{Result='ERROR';Error=$_.Exception.Message;Hint='Needs the Exchange connection plus a valid MessageTraceId and RecipientAddress from a Message Trace row. Detail covers the same ~10-day live window.'};return}
-$rows=@($rows)
+try{$rows=@(Invoke-ExoRest -Cmdlet Get-MessageTraceDetailV2 -Parameters @{MessageTraceId=$mtid;RecipientAddress=$rcpt})}catch{[PSCustomObject]@{Result='ERROR';Error=$_.Exception.Message;Hint='Needs a valid MessageTraceId and RecipientAddress from a Message Trace row. Detail runs app-only over Get-MessageTraceDetailV2 (adminapi InvokeCommand) and covers the same ~10-day live window.'};return}
 if($rows.Count -eq 0){[PSCustomObject]@{Result='No detail events';MessageTraceId=$mtid;Recipient=$rcpt;Hint='No per-hop events were returned for this message and recipient.'};return}
 $rows|Select-Object @{N='Date';E={$_.Date}},@{N='Event';E={$_.Event}},@{N='Action';E={$_.Action}},@{N='Detail';E={$_.Detail}},@{N='Data';E={$_.Data}}`,tags:["message","trace","detail","hops","delivery","messagetracedetail"],params:[
     {key:"MessageTraceId",label:"Message-Trace-ID",placeholder:"paste from a Message Trace row"},

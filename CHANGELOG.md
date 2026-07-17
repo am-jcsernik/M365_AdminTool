@@ -4,6 +4,34 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.7] — 2026-07-17
+
+### Fixed
+- **Message Trace works again (ADR-0011 phase 3, completing the ADR).** The
+  `message-trace` and `message-trace-detail` reports still called
+  `Get-MessageTrace(V2)` / `Get-MessageTraceDetail(V2)` as *module* cmdlets via
+  `Get-Command`, but the app-only connection no longer imports the
+  `ExchangeOnlineManagement` module — so they failed with "The term
+  'Get-MessageTrace' is not recognized." An in-container probe proved
+  `Get-MessageTraceV2` and `Get-MessageTraceDetailV2` run fine over the same
+  `adminapi InvokeCommand` transport as every other EXO cmdlet (the earlier
+  assumption that message trace needed a separate reporting API was wrong). Both
+  reports now call `Invoke-ExoRest -Cmdlet Get-MessageTrace(Detail)V2`; dates are
+  passed as ISO strings and `ResultSize` caps at 5000. Validated end-to-end in the
+  live container. **All Exchange reports are now app-only over `adminapi`.**
+- Dropped the legacy `Get-MessageTrace` (V1) fallback entirely — over `adminapi`
+  it now hard-errors server-side ("Get-MessageTrace will start deprecating on
+  September 1st, 2025 … switch to Get-MessageTraceV2").
+
+### Added
+- **`requireAny` report gate (report + UI).** A report may set `requireAny:true`
+  to block Run until at least one parameter has a value, so an all-optional report
+  can't be run wide open. Applied to **Message Trace**: the user must open the card
+  and set at least one filter (sender / recipient / date / status) before Run
+  enables, mirroring how picker-gated reports require a selection. A hint explains
+  why Run is disabled. (`message-trace-detail` was already gated by its required
+  `MessageTraceId`.)
+
 ## [12.1.6] — 2026-07-17
 
 ### Changed
