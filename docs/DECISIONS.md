@@ -5,6 +5,36 @@ context, the decision itself, and consequences/trade-offs.
 
 ---
 
+## 2026-07-17 -- ADR-0013: ADR-0011 phase 2 implemented — the last module-based Exchange reports moved to adminapi (v12.1.6)
+**Context:** Phase 1 (ADR-0012) proved `Invoke-ExoRest` as a general EXO transport
+and migrated the four mailbox reports. Four reports still called the broken
+`ExchangeOnlineManagement` module cmdlets (`Get-EXOMailbox`,
+`Get-EXOMailboxPermission`, `Get-EXORecipientPermission`, `Get-InboxRule`,
+`Get-DistributionGroup*`): `dl-members`, `user-inbox-rules`, `all-forwarding-rules`,
+`mailbox-permissions`. The transport was proven, but the REST field shapes for
+these cmdlets were unverified.
+**Decision (shapes probed in-container before touching report code):**
+- **Ran a read-only field-shape inspection** (`deploy/inspect-exo-phase2-fields.ps1`)
+  over `InvokeCommand` for each cmdlet against real AM data, then wrote the report
+  bodies to the observed serialization rather than the module's typed objects:
+  - `Get-DistributionGroup` returns `Guid`/`PrimarySmtpAddress`/`Identity` as plain
+    **strings** — resolve members from the string `Guid`; dropped `.ToString()`.
+  - `Get-InboxRule` `ForwardTo`/`RedirectTo`/`ForwardAsAttachmentTo` are a string
+    collection whose entries are `"Display Name" [EX:/o=…/cn=…]`; extract the quoted
+    display name for output. Empty → `null` (join tolerates it).
+  - `Get-MailboxPermission` `Deny` is the **string** `"False"`/`"True"`, not a bool →
+    exclude Deny ACEs with `Deny -ne 'True'`. `AccessRights` is a string collection.
+- **Migrated all four reports onto `Invoke-ExoRest`**; hardened `all-forwarding-rules`
+  with a per-mailbox `try/catch` so one unreadable mailbox can't abort the tenant scan.
+- **Validated end-to-end in the live container** (`deploy/validate-exo-phase2.ps1`)
+  against real data (55 DLs, 107 mailboxes) before shipping **v12.1.6**.
+**Consequences:** Every Exchange report except message-trace now runs app-only over
+`adminapi`, module fully out of the path. **Phase 3 remains:** `message-trace` /
+`message-trace-detail` use `Get-MessageTraceV2`, which is the reporting API, not
+adminapi — its own reverse-engineering effort. Perf note carried forward:
+`all-forwarding-rules` and `mailbox-sizes` are per-mailbox serial REST loops (slow at
+107; candidate to batch/parallelize).
+
 ## 2026-07-16 -- ADR-0012: ADR-0011 phase 1 implemented — adminapi InvokeCommand as the general EXO transport (v12.1.5)
 **Context:** Executing ADR-0011. ADR-0011 proved a raw entity GET
 (`adminapi/beta/{tid}/Mailbox`) returns 200 with an app-only token, but that path

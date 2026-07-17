@@ -1,17 +1,27 @@
 # Project State
-_Last updated: 2026-07-16 -- session 8_
+_Last updated: 2026-07-17 -- session 9_
 
 ## Current goal
-**App-only Exchange — ADR-0011 phase 1 SHIPPED (v12.1.5, deployed).** The
-`ExchangeOnlineManagement` module bypass is built and live: the Exchange connect
-no longer runs `Connect-ExchangeOnline`; it mints an app-only token for
-`outlook.office365.com` (client-assertion signed with the KV cert) and calls the
-EXO REST admin API (`adminapi InvokeCommand`) directly via two session-global
-helpers (`Get-ExoRestToken`, `Invoke-ExoRest`). The four phase-1 mailbox reports
-were rewritten onto `Invoke-ExoRest` and **validated end-to-end in the live
-container** against real data (107 mailboxes). Phases 2-3 remain (see below).
+**App-only Exchange — ADR-0011 phases 1 & 2 SHIPPED (v12.1.6, deployed).** The
+`ExchangeOnlineManagement` module bypass is live: the Exchange connect mints an
+app-only token for `outlook.office365.com` (client-assertion signed with the KV
+cert) and calls the EXO REST admin API (`adminapi InvokeCommand`) directly via two
+session-global helpers (`Get-ExoRestToken`, `Invoke-ExoRest`). **All Exchange
+reports except message-trace now run app-only over `Invoke-ExoRest`** — phase 1
+(shared-mailboxes, mail-forwarding, mailbox-sizes, user-mailbox) and phase 2
+(dl-members, user-inbox-rules, all-forwarding-rules, mailbox-permissions), each
+validated end-to-end in the live container against real data (55 DLs, 107
+mailboxes). Only **phase 3 (message-trace)** remains — see below.
 
 ## Status
+- [x] **Direct-REST rewrite — phase 2 SHIPPED (v12.1.6, session 9).** `reports.js`
+      `dl-members`, `user-inbox-rules`, `all-forwarding-rules`, `mailbox-permissions`
+      migrated off the broken module cmdlets onto `Invoke-ExoRest`. Field shapes
+      probed first (`deploy/inspect-exo-phase2-fields.ps1`): DG Guid/Identity are
+      strings; InboxRule Forward/Redirect are `"Name" [EX:…]` display strings (report
+      extracts the quoted name); MailboxPermission `Deny` is the string `"False"`/`"True"`
+      (Deny ACEs excluded). Validated end-to-end (`deploy/validate-exo-phase2.ps1`, 55
+      DLs / 107 mailboxes). Tests 22/22, lint + lint:copy green.
 - [x] **v12.1.4 shipped + deployed.** Per-tenant `orgDomain` (server whitelist +
       entry, admin table/form, connect resolution `req.body.org → orgDomain →
       tenantId`); Exchange connect banner now app-only-aware in `DOCKER_MODE`;
@@ -35,28 +45,24 @@ container** against real data (107 mailboxes). Phases 2-3 remain (see below).
 - [x] **Committed.** Session 7's v12.1.4 code is committed on `main` @ `4870eaf`.
 
 ## NEXT SESSION should start by
-**ADR-0011 phase 2 + 3** (the transport is proven; `Invoke-ExoRest -Cmdlet <X>
--Parameters @{...}` runs any EXO cmdlet over `adminapi InvokeCommand`, with paging):
-- **Phase 2 (cmdlet-based, low risk):** rewrite `dl-members` (Get-DistributionGroup
-  / Get-DistributionGroupMember), `user-inbox-rules` (Get-InboxRule),
-  `all-forwarding-rules` (Get-Mailbox + Get-InboxRule), `mailbox-permissions`
-  (Get-MailboxPermission + Get-RecipientPermission) onto `Invoke-ExoRest`. Verify the
-  Guid/Identity field shapes over REST (Get-DistributionGroup returns strings, not the
-  module's typed objects) — use the shape-dump probe pattern.
+**ADR-0011 phase 3** — the only Exchange report not yet on `Invoke-ExoRest`:
 - **Phase 3 (separate API):** `message-trace` / `message-trace-detail` use
-  Get-MessageTraceV2 which is NOT adminapi — it's the reporting API. Reverse-engineer
-  that endpoint separately; its own iteration.
-- **Perf:** `mailbox-sizes` stats each mailbox with its own REST call (107 at AM →
-  slow, ~minutes; within the 5-min job timeout). Candidate to batch/parallelize.
-- **UI confirm still owed:** the live click-through (connect Exchange, run
-  shared-mailboxes through Easy Auth) is unverified from here — Jim to confirm in the
-  browser. In-container logic is proven; only the authenticated HTTP path is untested.
+  Get-MessageTraceV2 which is NOT adminapi — it's the reporting API
+  (`reports.office365.com` / Graph reports). Reverse-engineer that endpoint
+  separately with the app-only token; its own iteration.
+- **Perf (carried forward):** `all-forwarding-rules` and `mailbox-sizes` are
+  per-mailbox serial REST loops (107 at AM → slow, ~minutes; within the 5-min job
+  timeout). Candidate to batch/parallelize.
+- **UI confirm still owed:** the live click-through through Easy Auth (connect
+  Exchange, run a phase-1/phase-2 report in the browser) is unverified from here —
+  Jim to confirm. In-container logic is proven for all 8 reports; only the
+  authenticated HTTP path is untested.
 
-## Deploy — v12.1.5 LIVE (session 8)
+## Deploy — v12.1.6 LIVE (session 9)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
-- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.5` (+`latest`), rev
-  **`m365-admin-reports--0000009`**, RunningAtMaxScale, 100% traffic. RG
-  `rg-m365admin`, eastus2. min 0 / max 1.
+- Image `amm365acr.azurecr.io/m365-admin-reports:12.1.6` (+`latest`), rev
+  rev **recorded post-deploy this session**, 100% traffic. RG `rg-m365admin`,
+  eastus2. min 0 / max 1.
 - Quick-roll: `az acr build --no-logs -r amm365acr -t m365-admin-reports:<v> -t
   m365-admin-reports:latest .` then `az containerapp update -n m365-admin-reports -g
   rg-m365admin --image …:<v>`.

@@ -4,6 +4,35 @@ All notable changes to this project. Versioning follows semver as of v11.0.0;
 earlier versions were sequential build numbers with letter-suffixed patch
 iterations (e.g., v10f).
 
+## [12.1.6] — 2026-07-17
+
+### Changed
+- **Phase-2 Exchange reports rewritten onto `Invoke-ExoRest` (ADR-0011)**
+  (`reports.js`): `dl-members`, `user-inbox-rules`, `all-forwarding-rules`,
+  `mailbox-permissions`. These were the last reports still calling the broken
+  `ExchangeOnlineManagement` module cmdlets (`Get-EXOMailbox`,
+  `Get-EXOMailboxPermission`, `Get-EXORecipientPermission`, `Get-InboxRule`,
+  `Get-DistributionGroup*`); they now run app-only over the `adminapi`
+  `InvokeCommand` REST surface like phase 1. Validated end-to-end in the live
+  container against real AM data (55 DLs, 107 mailboxes).
+
+### Fixed
+- **`dl-members`:** over REST `Get-DistributionGroup` returns `Guid`,
+  `PrimarySmtpAddress` and `Identity` as plain strings (not typed objects), so
+  member expansion resolves `Identity` from the string `Guid` directly (dropped
+  the now-invalid `.ToString()`).
+- **`user-inbox-rules` / `all-forwarding-rules`:** `ForwardTo` / `RedirectTo` /
+  `ForwardAsAttachmentTo` serialize as a string collection whose entries are
+  display strings with an embedded legacyExchangeDN
+  (`"Name" [EX:/o=…/cn=…]`); the reports now extract just the quoted display name
+  for readable output instead of dumping the raw EX address. Empty collections
+  come back `null`, which the join tolerates. `all-forwarding-rules` also gained
+  a per-mailbox `try/catch` so one unreadable mailbox no longer aborts the scan.
+- **`mailbox-permissions`:** over REST `Deny` serializes as the string
+  `"False"`/`"True"` (not a boolean), so a Deny ACE is now correctly excluded
+  from the "grants access" output via `Deny -ne 'True'`; `AccessRights` remains a
+  string collection and joins cleanly.
+
 ## [12.1.5] — 2026-07-16
 
 ### Fixed
