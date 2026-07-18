@@ -11,16 +11,18 @@ _Last updated: 2026-07-17 -- session 11_
 > tooling — don't re-derive a threat model from surface wording.
 
 ## Current goal
-**App-only Exchange — ADR-0011 COMPLETE (v12.1.7, shipped session 10).** The
-`ExchangeOnlineManagement` module is fully out of the path: the Exchange connect
-mints an app-only token for `outlook.office365.com` (client-assertion signed with
-the KV cert) and calls the EXO REST admin API (`adminapi InvokeCommand`) directly
-via two session-global helpers (`Get-ExoRestToken`, `Invoke-ExoRest`). **Every
-Exchange report now runs app-only over `Invoke-ExoRest`** — phase 1 (shared-mailboxes,
-mail-forwarding, mailbox-sizes, user-mailbox), phase 2 (dl-members, user-inbox-rules,
-all-forwarding-rules, mailbox-permissions), and phase 3 (message-trace,
-message-trace-detail) — each validated end-to-end in the live container against real
-data. No Exchange report remains on the module.
+**No active epic — the backlog is clear.** Session 11 shipped two follow-ons and
+closed every open STATE follow-up. Prior epic (ADR-0011, app-only Exchange) remains
+COMPLETE: the `ExchangeOnlineManagement` module is fully out of the path; every
+Exchange report runs app-only over `Invoke-ExoRest` (`adminapi InvokeCommand`,
+client-assertion signed with the KV cert). Session 11 added:
+- **v12.2.0** — parallel EXO fan-out (`Invoke-ExoRestBatch`) for the two slow
+  tenant-wide reports (`all-forwarding-rules`, `mailbox-sizes`). ADR-0015.
+- **v12.3.0** — Global Admins are tool admins via the `wids` claim (group-claim-
+  independent admin recovery); access-group + min-replicas ratified. ADR-0016.
+
+Live on rev `--0000013`, v12.3.0, healthy. Only remaining item is a *parked* idea
+(Message Trace → `Mail.Read` content drill-through), not scheduled.
 
 ## Status
 - [x] **Perf batching SHIPPED (v12.2.0, session 11) — live on rev `--0000012`.**
@@ -80,16 +82,22 @@ data. No Exchange report remains on the module.
 - [x] **Committed.** Session 7's v12.1.4 code is committed on `main` @ `4870eaf`.
 
 ## NEXT SESSION should start by
-ADR-0011 is done and fully verified; no Exchange-migration work remains. Open items:
-- **UI click-through CONFIRMED (session 10, Jim).** Message Trace verified working in
-  the browser through Easy Auth — the `requireAny` gate and the app-only
-  `Invoke-ExoRest` path are proven on the authenticated HTTP path, not just
-  in-container. ADR-0011 is closed end-to-end.
-- **Perf (v12.2.0 SHIPPED, session 11):** `all-forwarding-rules` and
-  `mailbox-sizes` migrated off serial per-mailbox loops onto the parallel
-  `Invoke-ExoRestBatch` helper; validated live (4–6× faster, 0 errors, no 429s at
-  throttle 8). If future throttling ever appears, lower the helper's default
-  `-ThrottleLimit`. Nothing else outstanding on this item.
+No forced next step — the backlog is clear and everything is shipped/deployed
+(v12.3.0, rev `--0000013`). Pick from:
+1. **Live confirm the `wids` admin path (quick, Jim-only).** Open `/api/config` in
+   the browser and check `me.adminVia` includes `global-admin-role`. If it only
+   shows `admin-group`, Easy Auth isn't forwarding `wids` → enable the group/role
+   claim in the app registration's token config. No lockout risk either way
+   (additive). This is the one loose end from session 11.
+2. **Unpark the `Mail.Read` content drill-through** (see "Parked ideas"): decide
+   the containment layer (EXO RBAC for Applications vs Application Access Policy),
+   then write the ADR before any code.
+3. **Older manual follow-ups** (unchanged, low priority): access group `197dd092`
+   is empty *by design* now (ratified ADR-0016) — no action; nothing else pending.
+
+Prior context, all CLOSED: ADR-0011 (app-only Exchange) complete end-to-end incl.
+browser click-through (session 10); perf batching (ADR-0015) and Global-Admin
+tool-admin (ADR-0016) shipped + validated (session 11).
 
 ## Deploy — v12.3.0 LIVE (session 11)
 - **URL:** https://m365-admin-reports.calmisland-95b7b76c.eastus2.azurecontainerapps.io
