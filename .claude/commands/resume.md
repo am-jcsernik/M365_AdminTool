@@ -6,4 +6,10 @@ Then summarize in 3-4 lines:
 - What's in progress / blocked
 - The single next concrete action
 
+When reading `docs/STATE.md`, treat its `## Deployment` section as follows: an
+absent, undated, or "<none recorded>" entry means the deploy state is UNKNOWN.
+It does NOT mean "not deployed". Say "deploy state unknown" and, if it matters
+for the next action, check the deploy target before concluding anything shipped
+or did not ship. Do not report a negative that the file does not actually assert.
+
 Do not start work yet. Wait for my go-ahead.

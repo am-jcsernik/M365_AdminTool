@@ -24,9 +24,28 @@ Steps:
    "Next session should start by" list.
 2. Append any architectural or trade-off decisions made this session to
    `docs/DECISIONS.md` (dated, ADR-style, newest at top, next ADR number).
+   The template ships its example ADR-0001 commented out, so a project's FIRST
+   real decision is **ADR-0001** -- do not count the commented example.
+   Skip any decision already recorded this session via `/decide` -- check the
+   top of the log before appending; a duplicate entry is worse than none.
 3. If a deliverable changed, add/extend a `docs/CHANGELOG.md` entry under
    [Unreleased] and bump the version per SemVer when appropriate.
 4. If NO arguments were given: propose a git commit message and WAIT for my
    confirmation before committing; do not push or deploy.
 5. If arguments authorize it: perform commit / push / deploy as granted above,
    stopping immediately on any failure, and report each step's result.
+6. If a deploy ran in step 5: update the `## Deployment` section of
+   `docs/STATE.md` (version, target, timestamp, how it was verified) and commit
+   that on its own with the subject `docs: record deploy of vX`.
+   - This is a SECOND commit, deliberately. Steps 1-3 run BEFORE the deploy, so
+     the wrap commit cannot contain its outcome. Committing after deploying is
+     the only accurate ordering: deploying before committing leaves deployed bits
+     with no commit behind them, and amend-plus-force-push rewrites published
+     history to record something that happened after it.
+   - If `docs/STATE.md` has no `## Deployment` section, CREATE it. Projects
+     scaffolded before this was added to the template will not have one, and
+     Sync-ProjectCommands only syncs `.claude/commands/`, never `docs/`. Use the
+     same four fields: version deployed, target, timestamp, verified by.
+   - If the deploy FAILED, record the failure and its timestamp anyway. A stale
+     "deployed" entry is worse than a recorded failure.
+   - Never write a timestamp for a deploy you did not observe succeed.

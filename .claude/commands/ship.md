@@ -16,4 +16,22 @@ STOP immediately on any failure and report what happened.
    notes" (e.g. `scripts\deploy.ps1` or an `az containerapp` command). Skip this
    step and say so if "$ARGUMENTS" contains "skip-deploy" OR no deploy procedure
    is documented - never improvise a deploy method.
-5. SUMMARY: report docs updated, commit hash, push result, deploy result.
+5. RECORD THE DEPLOY: update the `## Deployment` section of `docs/STATE.md` with
+   the version, target, timestamp, and how the deploy was verified - then commit
+   that change on its own with the subject `docs: record deploy of vX`.
+   - This is a SECOND commit, deliberately. Steps 1-3 necessarily run BEFORE the
+     deploy, so the wrap commit cannot contain the deploy outcome. Committing
+     after deploying is the only ordering that is both accurate and honest:
+     deploying before committing would leave deployed bits with no commit behind
+     them, and amending plus force-pushing would rewrite published history to
+     record something that happened after it.
+   - If `docs/STATE.md` has no `## Deployment` section, CREATE it. Projects
+     scaffolded before this was added to the template will not have one, and
+     Sync-ProjectCommands only syncs `.claude/commands/`, never `docs/`. Use the
+     same four fields: version deployed, target, timestamp, verified by.
+   - If step 4 was SKIPPED, skip this step too and leave the section untouched.
+   - If step 4 FAILED, record the failure and its timestamp here anyway. A stale
+     "deployed" entry is worse than a recorded failure.
+   - Never write a timestamp for a deploy you did not observe succeed.
+6. SUMMARY: report docs updated, commit hash, push result, deploy result, and the
+   hash of the deploy-record commit from step 5.

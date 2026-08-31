@@ -63,6 +63,9 @@ truncated or elided ("...", "rest unchanged", "same as above"). Same approval ga
    `HANDOFF-INCOMPLETE` markers in place.
 2. Append the handoff's decisions to `docs/DECISIONS.md` in this project's ADR style
    (dated, newest at top, ADR numbers continuing from what is already there).
+   The template ships its example ADR-0001 commented out, so if this project has
+   no real decisions yet the first one is **ADR-0001** -- do not count the
+   commented example.
    Preserve original rationale, alternatives, and trade-offs -- do not summarize
    them away.
 3. Update `docs/STATE.md`: current goal, status (done / in progress / untested or
