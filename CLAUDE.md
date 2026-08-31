@@ -1,4 +1,4 @@
-﻿# Project: M365_AdminTool
+# Project: M365_AdminTool
 
 > Created: 2026-07-14 - Scaffolded with New-ClaudeProject.ps1 v1.4.0
 
@@ -11,6 +11,26 @@
   the full wrap+commit+push+deploy bookend. Deploy only ever runs the procedure
   documented in "Project-specific notes" below.
 - Keep sessions short and focused. State lives in files, not in chat history.
+- **`_drop/` is where I hand you files; `$env:TEMP` is where you put your own.**
+  Different producer, different consumer -- neither one replaces the other.
+  - **`_drop/` at the project root, gitignored, is the transfer point for files
+    _I_ put there.** It is a path I can navigate to in Explorer, which a temp
+    directory is not. That is the whole reason it exists: without a named place,
+    every handoff invents a path, and invented paths accumulate content nobody
+    owns.
+  - **`$env:TEMP` is for artifacts _you_ generate and discard** -- probes,
+    scratch scripts, throwaway output. Nothing I need to see goes there.
+  - **It is a transfer point and never a home.** Nothing in it is retained by
+    default. When you read a file from it, ask in the SAME reply whether to keep
+    it -- not at `/wrap`, which parks the question where nobody returns to it.
+    On a yes, name the destination path before writing: filing is a write and
+    needs authorization like any other.
+  - **A file lost in `_drop/` has no committed copy to restore from.** An
+    accidental deletion of a *tracked* file is undone by `git checkout --`,
+    because the text still sits in `HEAD`; here there is no blob, no author, and
+    no record that the file existed at all. Its own mtime is the only surviving
+    evidence, and any write destroys that. This is why promotion is explicit
+    rather than tidy.
 
 ## Delivery standards
 - **Versioning:** Every deliverable carries a SemVer version *and* a matching

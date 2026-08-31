@@ -1,4 +1,4 @@
-﻿# OS / editor
+# OS / editor
 .DS_Store
 Thumbs.db
 *.swp
@@ -37,3 +37,6 @@ Handoff/
 
 # Nimbalyst editor session scratch (browser screenshots, transcript images)
 .nimbalyst/
+# --- added by Claude Project Starter ---
+nimbalyst-local/
+_drop/
