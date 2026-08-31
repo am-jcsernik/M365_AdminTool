@@ -1,4 +1,4 @@
-﻿---
+---
 description: Full ship - wrap docs, commit, push, and deploy in one authorized pass
 argument-hint: [skip-deploy]
 disable-model-invocation: true

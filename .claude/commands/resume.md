@@ -1,4 +1,4 @@
-﻿Read `docs/STATE.md`, the last 3 entries in `docs/DECISIONS.md`, and the output of
+Read `docs/STATE.md`, the last 3 entries in `docs/DECISIONS.md`, and the output of
 `git log --oneline -10`.
 
 Then summarize in 3-4 lines:

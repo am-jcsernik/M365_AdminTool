@@ -1,4 +1,4 @@
-﻿Add my **personal** GitHub remote to this repo.
+Add my **personal** GitHub remote to this repo.
 
 GitHub owner/org: `arcenik86`
 

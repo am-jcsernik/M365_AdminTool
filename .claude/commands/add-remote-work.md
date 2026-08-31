@@ -1,4 +1,4 @@
-﻿Add my **work** GitHub remote to this repo.
+Add my **work** GitHub remote to this repo.
 
 GitHub owner/org: `am-jcsernik`
 

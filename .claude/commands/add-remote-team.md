@@ -1,4 +1,4 @@
-﻿Add my **work team** (the shared dev-ops org) GitHub remote to this repo.
+Add my **work team** (the shared dev-ops org) GitHub remote to this repo.
 
 GitHub owner/org: `Alliances-Management-Dev-Ops`
 

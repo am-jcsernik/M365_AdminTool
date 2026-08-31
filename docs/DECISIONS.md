@@ -461,13 +461,3 @@ gitignored.
 **Consequences:** Version-controlled history going forward. The native instance on
 3365 was left running from its original location (promotion only, no relaunch), so
 the repo and that process are byte-identical but not yet the same runtime home.
-
-## 2026-07-14 -- ADR-0001: Adopt file-based session continuity
-**Context:** Sessions are kept short and numerous; chat history is not a reliable
-carrier of project state across sessions.
-**Decision:** State is carried in `docs/STATE.md` (volatile), `docs/DECISIONS.md`
-(this file), and git history. `CLAUDE.md` holds only stable rules. Sessions
-bookend with `/resume` and `/wrap`.
-**Consequences:** Continuity is portable across Claude Code CLI, Nimbalyst, and
-cloud routines. Cost: discipline -- a session that skips `/wrap` leaves the next
-one blind.

@@ -1,6 +1,7 @@
-﻿---
+---
 description: End-of-session wrap - update STATE/DECISIONS/CHANGELOG; optional commit/push/deploy via arguments
 argument-hint: [commit] [push] [deploy]
+disable-model-invocation: true
 ---
 Wrap up this session for clean handoff to the next one.
 
