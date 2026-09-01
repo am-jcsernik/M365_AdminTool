@@ -54,6 +54,18 @@ Steps:
      scaffolded before this was added to the template will not have one, and
      Sync-ProjectCommands only syncs `.claude/commands/`, never `docs/`. Use the
      same four fields: version deployed, target, timestamp, verified by.
+   - "Verified by" means the VERIFICATION PROCEDURE recorded in CLAUDE.md
+     "Project-specific notes" beside the deploy procedure: the command(s) that
+     read the deployed version FROM THE TARGET, plus the value observed.
+     Record the actual command and the value it returned -- never "looked
+     fine". A 200 is not a version; a stale container answers plausibly.
+   - If the project HAS a deploy procedure but NO verification procedure is
+     recorded there: ask me ONCE, proposing one from the kit README's
+     "Verifying a deploy" recipes for this project's shape, and on approval
+     record it in "Project-specific notes" beside the deploy procedure (a
+     write, authorized by that approval). A documented ask-and-record, never
+     an improvised check. Until a procedure is recorded and run, "verified by"
+     stays empty and the deploy state is UNVERIFIED -- say so.
    - If the deploy FAILED, record the failure and its timestamp anyway. A stale
      "deployed" entry is worse than a recorded failure.
    - Never write a timestamp for a deploy you did not observe succeed.
