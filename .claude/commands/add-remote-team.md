@@ -1,3 +1,7 @@
+---
+description: Add my work team (shared dev-ops org) GitHub remote to this repo
+argument-hint: [repo-name]
+---
 Add my **work team** (the shared dev-ops org) GitHub remote to this repo.
 
 GitHub owner/org: `Alliances-Management-Dev-Ops`

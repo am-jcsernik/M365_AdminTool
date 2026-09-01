@@ -79,8 +79,12 @@ truncated or elided ("...", "rest unchanged", "same as above"). Same approval ga
    in `docs/DECISIONS.md` or `docs/ARCHITECTURE.md`.
 6. If the handoff names dependencies, tell me the install commands. Do not install
    anything yourself.
-7. Tell me the temp extraction path so I can delete it when satisfied. Do not delete
-   the source archive.
+7. Tell me the temp extraction path so I can delete it when satisfied. Never
+   delete the source archive unasked -- and if it lives in `_drop/`, end this
+   same reply with the transfer-point disposition question: keep it (name the
+   destination it would be filed to; filing is a write and needs authorization)
+   or discard it. `_drop/` retains nothing by default, so leaving the archive
+   there silently is not an option.
 
 ## Phase 3 -- summary
 Report: files created (and any skipped), ADRs appended, STATE/CLAUDE.md updates,

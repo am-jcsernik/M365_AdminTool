@@ -1,3 +1,7 @@
+---
+description: Add my work GitHub remote to this repo
+argument-hint: [repo-name]
+---
 Add my **work** GitHub remote to this repo.
 
 GitHub owner/org: `am-jcsernik`

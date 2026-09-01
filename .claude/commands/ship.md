@@ -9,13 +9,21 @@ STOP immediately on any failure and report what happened.
 
 1. WRAP: update `docs/STATE.md` (date, session number, goal, status, active
    context, next-session list); append decisions to `docs/DECISIONS.md`
-   (ADR-style); update `docs/CHANGELOG.md` / bump SemVer if a deliverable changed.
+   (ADR-style); update `docs/CHANGELOG.md` / bump SemVer if a deliverable changed;
+   update `docs/ARCHITECTURE.md` if this session changed the system's shape
+   (components, data flow, external dependencies, deploy shape) -- no other
+   step writes it, so drift there is silent.
 2. COMMIT: stage everything; imperative subject, body explains why.
 3. PUSH: push the current branch to its remote, setting upstream if needed.
 4. DEPLOY: run the deploy procedure documented in CLAUDE.md "Project-specific
    notes" (e.g. `scripts\deploy.ps1` or an `az containerapp` command). Skip this
    step and say so if "$ARGUMENTS" contains "skip-deploy" OR no deploy procedure
    is documented - never improvise a deploy method.
+   (Deliberately different from /wrap deploy, which STOPS after the push and
+   asks in the no-procedure case: there "deploy" named that step explicitly, so
+   the unfulfillable request stops; /ship authorizes everything applicable, and
+   on a project with no deploy procedure nothing is -- skipping loudly beats
+   asking a question with only one answer every session.)
 5. RECORD THE DEPLOY: update the `## Deployment` section of `docs/STATE.md` with
    the version, target, timestamp, and how the deploy was verified - then commit
    that change on its own with the subject `docs: record deploy of vX`.

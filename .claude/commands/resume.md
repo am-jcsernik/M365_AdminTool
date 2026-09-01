@@ -1,3 +1,6 @@
+---
+description: Session start - read STATE, recent decisions, and git log, then summarize where things stand
+---
 Read `docs/STATE.md`, the last 3 entries in `docs/DECISIONS.md`, and the output of
 `git log --oneline -10`.
 

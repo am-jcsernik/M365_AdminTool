@@ -1,3 +1,7 @@
+---
+description: Add my personal GitHub remote to this repo
+argument-hint: [repo-name]
+---
 Add my **personal** GitHub remote to this repo.
 
 GitHub owner/org: `arcenik86`
