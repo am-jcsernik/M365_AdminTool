@@ -69,3 +69,12 @@ Steps:
    - If the deploy FAILED, record the failure and its timestamp anyway. A stale
      "deployed" entry is worse than a recorded failure.
    - Never write a timestamp for a deploy you did not observe succeed.
+8. ACHIEVEMENTS (only if `.claude/commands/achievement.md` exists here and
+   its clone path is not `NOT-CONFIGURED`): propose 0-3 candidate entries from
+   what this session actually SHIPPED -- not what it attempted -- in ONE form,
+   each with approve / edit / reject. File each approved entry by following
+   steps 2-6 of `achievement.md`. Zero candidates is a valid outcome: say so in
+   one line and do not ask about it.
+   - This step ASKS even when arguments authorized commit / push / deploy.
+     Those arguments authorize this project's commit, push and deploy -- never
+     a write to another repository.

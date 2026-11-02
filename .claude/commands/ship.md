@@ -5,7 +5,8 @@ disable-model-invocation: true
 ---
 Ship this session's work end-to-end. By invoking this command I have explicitly
 authorized every step below - do not re-ask for confirmation between steps, but
-STOP immediately on any failure and report what happened.
+STOP immediately on any failure and report what happened. (Steps 5 and 6 each
+name the one question they may still ask; nothing else asks.)
 
 1. WRAP: update `docs/STATE.md` (date, session number, goal, status, active
    context, next-session list); append decisions to `docs/DECISIONS.md`
@@ -54,5 +55,13 @@ STOP immediately on any failure and report what happened.
    - If step 4 FAILED, record the failure and its timestamp here anyway. A stale
      "deployed" entry is worse than a recorded failure.
    - Never write a timestamp for a deploy you did not observe succeed.
-6. SUMMARY: report docs updated, commit hash, push result, deploy result, and the
-   hash of the deploy-record commit from step 5.
+6. ACHIEVEMENTS (only if `.claude/commands/achievement.md` exists here and its
+   clone path is not `NOT-CONFIGURED`): propose 0-3 candidate entries from what
+   this session actually SHIPPED, in ONE form, each approve / edit / reject, and
+   file each approved one by following steps 2-6 of `achievement.md`. Zero
+   candidates: say so in one line, do not ask.
+   - Like step 5's verification question, this step asks despite /ship's
+     blanket authorization: /ship authorizes this project's commit, push and
+     deploy, never a write to another repository.
+7. SUMMARY: report docs updated, commit hash, push result, deploy result, the
+   hash of the deploy-record commit from step 5, and any achievements filed.
