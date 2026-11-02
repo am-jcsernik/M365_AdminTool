@@ -22,7 +22,8 @@ Arguments: "$ARGUMENTS"
 3. **The entry.** The format is `SCHEMA.md` in the clone; read it first.
    - If the arguments hold a pasted block (it starts with a code fence or with
      `---`), that block IS the entry, produced by a Claude chat. Do not rewrite
-     its wording. Its `source` must be `claude-chat`.
+     its wording; only its `project` line may change, and only by the check
+     below. Its `source` must be `claude-chat`.
    - Otherwise, draft one from THIS session's work: `date` today; `category`
      and `org` from the project default; `project` this project's name; a
      one-line `title` (what was achieved) and `impact` (why it mattered, in
@@ -32,6 +33,15 @@ Arguments: "$ARGUMENTS"
      Never invent a metric, a figure or an outcome.
    - Client names and engagement detail are allowed. Secrets, credentials and
      tokens never are; the filing script refuses them.
+   - **Same project as before?** A project's history in the log is every
+     entry with the same `org` and `project`, so a new spelling starts a
+     separate history. Read the frontmatter `org:` and `project:` of every file
+     under `C:\Claude\Achievements\entries\` (read only). If this entry's
+     project matches one filed under its org, ignoring case, use that
+     spelling and go on. Otherwise ask me in a form BEFORE step 4: the
+     project names already filed under this org, plus "new project: <this
+     name>"; if the name is filed under another org, say which. Use what I
+     choose.
 4. **My approval.** Show me the complete entry in a form: an editable text
    field seeded with the entry, and a choice to file it or stop. Nothing is
    filed without my yes, and what I approve is filed exactly as approved.
