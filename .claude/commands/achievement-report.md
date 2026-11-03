@@ -35,7 +35,12 @@ Arguments: "$ARGUMENTS"
      three themes that matter most for this purpose.
    - **By theme or project** -- for each: what was done, why it mattered
      (from the entries' `impact`), and the evidence (from `evidence`). Cite
-     each claim's entry by date and title.
+     each claim's entry by date and title. Where the report opens a project
+     with its overview, open with it too: when it started and what it set
+     out to do, then what it delivered -- the arc from scope to now.
+     Entries marked "backfilled" were reconstructed later from the
+     project's history, not written at the time; say so where a claim rests
+     on one.
    - **Skills and breadth** -- from the report's skills table.
    - **To strengthen** -- entries whose impact has no measurable result, or
      whose evidence is thin. Put each as a QUESTION to me ("what did this

@@ -1,10 +1,10 @@
 ---
 description: File an achievement (work or personal) in my achievements log
-argument-hint: [a block pasted from a Claude chat]
+argument-hint: [a block, or a backfill set, pasted from a Claude chat]
 ---
 File ONE entry in my achievements log -- the running record of what I work on,
 used for status updates to management and as evidence for a promotion or raise
-case.
+case -- or one set of blocks a chat produced to backfill a project.
 
 Achievements log clone: `C:\Claude\Achievements`
 Arguments: "$ARGUMENTS"
@@ -24,6 +24,13 @@ Arguments: "$ARGUMENTS"
      `---`), that block IS the entry, produced by a Claude chat. Do not rewrite
      its wording; only its `project` line may change, and only by the check
      below. Its `source` must be `claude-chat`.
+   - **Several pasted blocks are a set** -- a chat's reply to `Backfill
+     achievements:`. A block with `started:` and `status:` and no `date:` is
+     the project's overview (at most one); every other block is an entry.
+     Their `source` is `backfill`. The same rules apply to every block: no
+     rewording, and only `project` may change, by the check below, the same
+     way in every block. If the log already holds an entry covering a pasted
+     milestone, tell me which before step 4.
    - Otherwise, draft one from THIS session's work: `date` today; `category`
      and `org` from the project default; `project` this project's name; a
      one-line `title` (what was achieved) and `impact` (why it mattered, in
@@ -43,22 +50,27 @@ Arguments: "$ARGUMENTS"
      name>"; if the name is filed under another org, say which. Use what I
      choose.
 4. **My approval.** Show me the complete entry in a form: an editable text
-   field seeded with the entry, and a choice to file it or stop. Nothing is
+   field seeded with the entry, and a choice to file it or stop. For a set,
+   one form: the field holds every block, the overview first. Nothing is
    filed without my yes, and what I approve is filed exactly as approved.
 5. **File it.** Write the approved text to a new file in the system temp
    directory (UTF-8, no BOM), then run, in PowerShell:
    `& 'C:\Claude\Achievements\tools\Add-Achievement.ps1' -Path '<that file>'`
-   and delete the temp file afterwards. That script is the ONLY writer: it
-   validates, writes the entry into its org/project folder, regenerates the
-   index in the clone's `README.md`, commits those two files by explicit
-   path, and pushes.
+   and delete the temp file afterwards. For a set, write each block to its
+   own file and run ONCE:
+   `& 'C:\Claude\Achievements\tools\Add-Achievement.ps1' -Path '<entry 1>', '<entry 2>' -ProjectPath '<overview>'`
+   -- the set is validated whole and filed in one commit, or not at all.
+   That script is the ONLY writer: it validates, writes each file into its
+   org/project folder, regenerates the index in the clone's `README.md`,
+   commits exactly those files by explicit path, and pushes.
    Never edit, stage or commit anything in the clone yourself. This is the one
    ruled exception to committing through the commit widget (ruled 2026-11-02),
    and it belongs to the script, not to you.
 6. **Report by exit code**, quoting the script's RESULT or error line:
    `0` filed and pushed (give the path and commit); `2` refused -- show every
-   problem, fix the entry with me, and go back to step 4; `3` written but not
-   committed -- give the path, do not retry; `4` committed but not pushed --
-   say so, do not retry; `1` could not start -- show the error. (One `1` is
-   uncommitted changes to the clone's `README.md`: they are mine to commit
-   or discard, never yours.)
+   problem (in a set, each names its file), fix the entry with me, and go
+   back to step 4; `3` written but not committed -- give the paths, do not
+   retry; `4` committed but not pushed -- say so, do not retry; `1` could not
+   start -- show the error. (One `1` is uncommitted changes to the clone's
+   `README.md` or a `PROJECT.md`: they are mine to commit or discard, never
+   yours.)
