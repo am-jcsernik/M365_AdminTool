@@ -15,10 +15,13 @@ Arguments: "$ARGUMENTS"
    `.\Sync-ProjectCommands.ps1` for this project. If the path is set but the
    folder, or `tools\Add-Achievement.ps1` inside it, does not exist, STOP and
    say which is missing. Do nothing else in either case.
-2. **This project's default.** Look in this project's `CLAUDE.md` for a line
-   `Achievements: category=<work|personal> org=<org>`. If there is none, ask me
-   for both in one form, and offer to add that line under "Project-specific
-   notes" -- add it only if I say yes. An entry may still override either value.
+2. **This project's default -- only when drafting from this session's work.**
+   A pasted block, or a pasted set, carries its own `category` and `org`, so
+   skip this step for one. Otherwise look in this project's `CLAUDE.md` for a
+   line `Achievements: category=<work|personal> org=<org>`. If there is none,
+   ask me for both in one form, and offer to add that line under
+   "Project-specific notes" -- add it only if I say yes. An entry may still
+   override either value.
 3. **The entry.** The format is `SCHEMA.md` in the clone; read it first.
    - If the arguments hold a pasted block (it starts with a code fence or with
      `---`), that block IS the entry, produced by a Claude chat. Do not rewrite
