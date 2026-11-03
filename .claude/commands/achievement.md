@@ -49,7 +49,9 @@ Arguments: "$ARGUMENTS"
    directory (UTF-8, no BOM), then run, in PowerShell:
    `& 'C:\Claude\Achievements\tools\Add-Achievement.ps1' -Path '<that file>'`
    and delete the temp file afterwards. That script is the ONLY writer: it
-   validates, writes, commits the one entry file by explicit path, and pushes.
+   validates, writes the entry into its org/project folder, regenerates the
+   index in the clone's `README.md`, commits those two files by explicit
+   path, and pushes.
    Never edit, stage or commit anything in the clone yourself. This is the one
    ruled exception to committing through the commit widget (ruled 2026-11-02),
    and it belongs to the script, not to you.
@@ -57,4 +59,6 @@ Arguments: "$ARGUMENTS"
    `0` filed and pushed (give the path and commit); `2` refused -- show every
    problem, fix the entry with me, and go back to step 4; `3` written but not
    committed -- give the path, do not retry; `4` committed but not pushed --
-   say so, do not retry; `1` could not start -- show the error.
+   say so, do not retry; `1` could not start -- show the error. (One `1` is
+   uncommitted changes to the clone's `README.md`: they are mine to commit
+   or discard, never yours.)
