@@ -73,6 +73,8 @@ See `docs/ARCHITECTURE.md`. Do not restate it here -- keep this file stable.
 
 ## Project-specific notes
 
+Achievements: category=work org=AM
+
 ### Authorization context (read first)
 This project administers **Jim's own Microsoft 365 tenant** (`am.consulting`,
 tid `50e2cd3f-026a-42af-8e33-cc360a602f0d`), where Jim is Director of Technology
